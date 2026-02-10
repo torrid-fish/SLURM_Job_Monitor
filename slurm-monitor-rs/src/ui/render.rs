@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 /// Render the entire UI.
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     // Create main layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -32,7 +32,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         ])
         .split(chunks[1]);
 
-    render_status_panel(frame, app, body_chunks[0]);
+    render_status_panel(frame, &mut *app, body_chunks[0]);
     render_output_panel(frame, app, body_chunks[1]);
 }
 
@@ -70,15 +70,27 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the status panel with job list.
-fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
+fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let panel_title = "Job Status (n: prev, p: next, d: delete)";
-    
+
     if app.jobs.is_empty() {
         let empty = Paragraph::new("No jobs")
             .block(Block::default().title(panel_title).borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
         frame.render_widget(empty, area);
         return;
     }
+
+    // Dynamic name truncation: use available width instead of hardcoded 20
+    // area.width - 2 (borders) - 12*3 (fixed cols) - 3 (column gaps) = area.width - 41
+    let name_max_len = (area.width as usize).saturating_sub(41).max(10);
+
+    let sorted_ids = app.get_sorted_job_ids();
+
+    // Sync table_state selection with current_job_id
+    let selected_index = app
+        .current_job_id
+        .and_then(|cid| sorted_ids.iter().position(|&id| id == cid));
+    app.table_state.select(selected_index);
 
     // Create table header
     let header_cells = ["Job ID", "Status", "Runtime", "Name"]
@@ -87,18 +99,10 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
     let header = Row::new(header_cells).height(1);
 
     // Create table rows
-    let rows: Vec<Row> = app
-        .get_sorted_job_ids()
+    let rows: Vec<Row> = sorted_ids
         .iter()
         .filter_map(|&job_id| {
             let job = app.jobs.get(&job_id)?;
-            let is_current = Some(job_id) == app.current_job_id;
-
-            let job_id_display = if is_current {
-                format!("▶ {}", job_id)
-            } else {
-                job_id.to_string()
-            };
 
             let status_color = match job.status {
                 JobStatus::Queued => Color::Yellow,
@@ -116,30 +120,19 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
 
             let name = if job.info.job_name.is_empty() {
                 format!("Job {}", job_id)
+            } else if job.info.job_name.len() > name_max_len {
+                format!("{}...", &job.info.job_name[..name_max_len.saturating_sub(3)])
             } else {
-                // Truncate long names
-                let max_len = 20;
-                if job.info.job_name.len() > max_len {
-                    format!("{}...", &job.info.job_name[..max_len - 3])
-                } else {
-                    job.info.job_name.clone()
-                }
-            };
-
-            let row_style = if is_current {
-                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+                job.info.job_name.clone()
             };
 
             Some(
                 Row::new(vec![
-                    Cell::from(job_id_display).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(job_id.to_string()).style(Style::default().fg(Color::Cyan)),
                     Cell::from(job.status.as_str()).style(Style::default().fg(status_color)),
                     Cell::from(runtime),
                     Cell::from(name),
                 ])
-                .style(row_style)
                 .height(1),
             )
         })
@@ -155,6 +148,8 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(header)
+    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .highlight_symbol("▶ ")
     .block(
         Block::default()
             .title(panel_title)
@@ -162,7 +157,7 @@ fn render_status_panel(frame: &mut Frame, app: &App, area: Rect) {
             .border_style(Style::default().fg(Color::Yellow)),
     );
 
-    frame.render_widget(table, area);
+    frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
 /// Render the output panel with stdout and stderr.

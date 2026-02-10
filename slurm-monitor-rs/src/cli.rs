@@ -251,7 +251,7 @@ fn run_event_loop(
             queue!(backend, BeginSynchronizedUpdate)?;
         }
         terminal.draw(|frame| {
-            ui::render(frame, app);
+            ui::render(frame, &mut *app);
         })?;
         {
             let backend = terminal.backend_mut();

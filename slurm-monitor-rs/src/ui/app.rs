@@ -3,6 +3,7 @@
 use crate::job_manager::JobInfo;
 use crate::utils::JobStatus;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
 
 /// Which panel is currently focused
@@ -136,6 +137,8 @@ pub struct App {
     pub auto_discover: bool,
     /// Jobs that have been explicitly deleted by the user (to prevent re-adding via auto-discovery)
     pub deleted_jobs: HashSet<u64>,
+    /// Table state for scroll-to-focus in the job list
+    pub table_state: TableState,
 }
 
 impl App {
@@ -151,6 +154,7 @@ impl App {
             stderr_panel_height: 20, // Default, will be updated from actual render layout
             auto_discover: false,
             deleted_jobs: HashSet::new(),
+            table_state: TableState::default(),
         }
     }
 
