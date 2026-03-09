@@ -16,7 +16,7 @@ fn debug_log(msg: &str) {
 use crate::log_tailer::{LogTailer, LogUpdate};
 use crate::status_monitor::{StatusMonitor, StatusUpdate};
 use crate::ui::{self, App};
-use crate::utils::get_all_job_ids_from_sacct;
+use crate::utils::{expand_array_job, get_all_job_ids_from_sacct, JobId};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
@@ -57,15 +57,16 @@ pub enum Commands {
     },
     /// Monitor one or more existing SLURM jobs
     Watch {
-        /// Job IDs to monitor (if none provided, monitors all visible jobs)
-        job_ids: Vec<u64>,
+        /// Job IDs to monitor. Supports array jobs: "8322" expands all subtasks,
+        /// "8322_5" monitors only that specific subtask.
+        job_ids: Vec<String>,
     },
     /// List all currently tracked jobs
     List,
     /// Stop monitoring a specific job (does not cancel the job)
     Stop {
-        /// Job ID to stop monitoring
-        job_id: u64,
+        /// Job ID to stop monitoring (e.g. "8322" or "8322_5")
+        job_id: String,
     },
 }
 
@@ -80,7 +81,7 @@ pub fn handle_submit(script: &PathBuf, no_watch: bool) -> Result<()> {
 
     if !no_watch {
         println!("Starting monitor...");
-        run_monitor(vec![job_id], false)?;
+        run_monitor(vec![JobId::from(job_id)], false)?;
     } else {
         println!(
             "Job {} submitted. Use 'slurm-monitor watch {}' to monitor it.",
@@ -92,8 +93,8 @@ pub fn handle_submit(script: &PathBuf, no_watch: bool) -> Result<()> {
 }
 
 /// Handle the watch command.
-pub fn handle_watch(job_ids: Vec<u64>) -> Result<()> {
-    let (job_ids, auto_discover) = if job_ids.is_empty() {
+pub fn handle_watch(job_id_strs: Vec<String>) -> Result<()> {
+    let (job_ids, auto_discover) = if job_id_strs.is_empty() {
         println!("No job IDs provided. Fetching all visible jobs from sacct...");
         let all_jobs = get_all_job_ids_from_sacct();
         if all_jobs.is_empty() {
@@ -112,7 +113,39 @@ pub fn handle_watch(job_ids: Vec<u64>) -> Result<()> {
         println!("Auto-discovery enabled: new jobs will be automatically added to monitoring.");
         (all_jobs, true)
     } else {
-        (job_ids, false)
+        // Parse each argument and expand array jobs as needed
+        let mut expanded: Vec<JobId> = Vec::new();
+        for s in &job_id_strs {
+            let parsed: JobId = s
+                .parse()
+                .with_context(|| format!("Invalid job ID: {}", s))?;
+
+            if parsed.array_index.is_some() {
+                // Explicit array index — monitor only this subtask
+                expanded.push(parsed);
+            } else {
+                // No array index — try to expand all subtasks
+                let subtasks = expand_array_job(parsed.base_id);
+                expanded.extend(subtasks);
+            }
+        }
+
+        expanded.sort_unstable();
+        expanded.dedup();
+
+        if expanded.len() > job_id_strs.len() {
+            println!(
+                "Expanded to {} subtask(s): {}",
+                expanded.len(),
+                expanded
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        (expanded, false)
     };
 
     run_monitor(job_ids, auto_discover)?;
@@ -145,7 +178,10 @@ pub fn handle_list() -> Result<()> {
 }
 
 /// Handle the stop command.
-pub fn handle_stop(job_id: u64) -> Result<()> {
+pub fn handle_stop(job_id_str: &str) -> Result<()> {
+    let job_id: JobId = job_id_str
+        .parse()
+        .with_context(|| format!("Invalid job ID: {}", job_id_str))?;
     println!("Stopped tracking job {}", job_id);
     println!("Note: This command is informational only in the Rust version.");
     println!("The job continues running on SLURM.");
@@ -153,7 +189,7 @@ pub fn handle_stop(job_id: u64) -> Result<()> {
 }
 
 /// Run the monitor UI.
-fn run_monitor(initial_job_ids: Vec<u64>, auto_discover: bool) -> Result<()> {
+fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -282,8 +318,10 @@ fn run_event_loop(
         while let Ok(update) = log_rx.try_recv() {
             debug_log(&format!("cli: received LogUpdate label={} content_len={}", update.label, update.content.len()));
             // Parse label to get job_id and log type
+            // Label format: "stdout_8322" or "stdout_8322_5"
+            // split_once('_') gives ("stdout", "8322") or ("stdout", "8322_5")
             if let Some((log_type, job_id_str)) = update.label.split_once('_') {
-                if let Ok(job_id) = job_id_str.parse::<u64>() {
+                if let Ok(job_id) = job_id_str.parse::<JobId>() {
                     debug_log(&format!("cli: updating log for job {} type {}", job_id, log_type));
                     app.update_log(job_id, log_type, &update.content);
                 }
@@ -293,7 +331,7 @@ fn run_event_loop(
         // Auto-discover new jobs
         if app.auto_discover && last_discovery.elapsed() >= discovery_interval {
             last_discovery = Instant::now();
-            let current_jobs: Vec<u64> = app.jobs.keys().copied().collect();
+            let current_jobs: Vec<JobId> = app.jobs.keys().copied().collect();
             let all_jobs = get_all_job_ids_from_sacct();
 
             for job_id in all_jobs {

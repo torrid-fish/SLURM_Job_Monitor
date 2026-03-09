@@ -1,7 +1,7 @@
 //! Application state management for the TUI.
 
 use crate::job_manager::JobInfo;
-use crate::utils::JobStatus;
+use crate::utils::{JobId, JobStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
@@ -38,7 +38,7 @@ pub struct JobData {
 }
 
 impl JobData {
-    pub fn new(job_id: u64) -> Self {
+    pub fn new(job_id: JobId) -> Self {
         Self {
             status: JobStatus::Unknown,
             info: JobInfo {
@@ -120,9 +120,9 @@ impl JobData {
 /// Main application state
 pub struct App {
     /// All job data
-    pub jobs: HashMap<u64, JobData>,
+    pub jobs: HashMap<JobId, JobData>,
     /// Currently selected job ID
-    pub current_job_id: Option<u64>,
+    pub current_job_id: Option<JobId>,
     /// Which panel is focused
     pub focused_panel: FocusedPanel,
     /// Whether the app should quit
@@ -136,7 +136,7 @@ pub struct App {
     /// Auto-discover new jobs
     pub auto_discover: bool,
     /// Jobs that have been explicitly deleted by the user (to prevent re-adding via auto-discovery)
-    pub deleted_jobs: HashSet<u64>,
+    pub deleted_jobs: HashSet<JobId>,
     /// Table state for scroll-to-focus in the job list
     pub table_state: TableState,
 }
@@ -159,7 +159,7 @@ impl App {
     }
 
     /// Add a job to track.
-    pub fn add_job(&mut self, job_id: u64) {
+    pub fn add_job(&mut self, job_id: JobId) {
         if !self.jobs.contains_key(&job_id) {
             self.jobs.insert(job_id, JobData::new(job_id));
         }
@@ -169,7 +169,7 @@ impl App {
     }
 
     /// Remove a job from tracking.
-    pub fn remove_job(&mut self, job_id: u64) {
+    pub fn remove_job(&mut self, job_id: JobId) {
         self.jobs.remove(&job_id);
         // Track deleted jobs to prevent re-adding via auto-discovery
         self.deleted_jobs.insert(job_id);
@@ -178,15 +178,22 @@ impl App {
         }
     }
 
-    /// Get sorted job IDs (descending order).
-    pub fn get_sorted_job_ids(&self) -> Vec<u64> {
-        let mut ids: Vec<u64> = self.jobs.keys().copied().collect();
-        ids.sort_unstable_by(|a, b| b.cmp(a));
+    /// Get sorted job IDs.
+    ///
+    /// Sorts by base_id descending, then array_index ascending (None before Some).
+    /// This groups array tasks together under their parent.
+    pub fn get_sorted_job_ids(&self) -> Vec<JobId> {
+        let mut ids: Vec<JobId> = self.jobs.keys().copied().collect();
+        ids.sort_unstable_by(|a, b| {
+            b.base_id
+                .cmp(&a.base_id)
+                .then(b.array_index.cmp(&a.array_index))
+        });
         ids
     }
 
     /// Update job status.
-    pub fn update_job_status(&mut self, job_id: u64, status: JobStatus, info: JobInfo) {
+    pub fn update_job_status(&mut self, job_id: JobId, status: JobStatus, info: JobInfo) {
         if let Some(job) = self.jobs.get_mut(&job_id) {
             job.status = status;
             job.info = info;
@@ -202,7 +209,7 @@ impl App {
     }
 
     /// Update log content.
-    pub fn update_log(&mut self, job_id: u64, log_type: &str, content: &str) {
+    pub fn update_log(&mut self, job_id: JobId, log_type: &str, content: &str) {
         if let Some(job) = self.jobs.get_mut(&job_id) {
             match log_type {
                 "stdout" => job.append_stdout(content, self.stdout_panel_height),
@@ -258,7 +265,6 @@ impl App {
                         let visible_lines = self.stdout_panel_height;
                         let max_scroll = job.stdout_lines.len().saturating_sub(visible_lines);
                         if max_scroll == 0 {
-                            // Not enough content to scroll
                             return;
                         }
                         let old_scroll = job.stdout_scroll;
@@ -271,7 +277,6 @@ impl App {
                         let visible_lines = self.stderr_panel_height;
                         let max_scroll = job.stderr_lines.len().saturating_sub(visible_lines);
                         if max_scroll == 0 {
-                            // Not enough content to scroll
                             return;
                         }
                         let old_scroll = job.stderr_scroll;
@@ -294,7 +299,6 @@ impl App {
                         let visible_lines = self.stdout_panel_height;
                         let max_scroll = job.stdout_lines.len().saturating_sub(visible_lines);
                         if max_scroll == 0 {
-                            // Not enough content to scroll
                             return;
                         }
                         let old_scroll = job.stdout_scroll;
@@ -302,7 +306,6 @@ impl App {
                         if job.stdout_scroll != old_scroll {
                             job.stdout_scroll_mode = true;
                         } else if job.stdout_scroll == max_scroll {
-                            // Already at bottom - exit scroll mode to resume auto-scroll
                             job.stdout_scroll_mode = false;
                         }
                     }
@@ -310,7 +313,6 @@ impl App {
                         let visible_lines = self.stderr_panel_height;
                         let max_scroll = job.stderr_lines.len().saturating_sub(visible_lines);
                         if max_scroll == 0 {
-                            // Not enough content to scroll
                             return;
                         }
                         let old_scroll = job.stderr_scroll;
@@ -318,7 +320,6 @@ impl App {
                         if job.stderr_scroll != old_scroll {
                             job.stderr_scroll_mode = true;
                         } else if job.stderr_scroll == max_scroll {
-                            // Already at bottom - exit scroll mode to resume auto-scroll
                             job.stderr_scroll_mode = false;
                         }
                     }
@@ -436,5 +437,14 @@ impl Default for App {
 impl Default for JobStatus {
     fn default() -> Self {
         JobStatus::Unknown
+    }
+}
+
+impl Default for JobId {
+    fn default() -> Self {
+        Self {
+            base_id: 0,
+            array_index: None,
+        }
     }
 }

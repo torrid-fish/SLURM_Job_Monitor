@@ -1,6 +1,6 @@
 //! Job Manager for SLURM job lifecycle management.
 
-use crate::utils::{parse_job_id, parse_sacct_output, run_slurm_command, JobStatus};
+use crate::utils::{parse_job_id, parse_sacct_output, run_slurm_command, JobId, JobStatus};
 
 /// Write debug message to file
 fn debug_log(msg: &str) {
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Default)]
 pub struct JobInfo {
     #[allow(dead_code)]
-    pub job_id: u64,
+    pub job_id: JobId,
     pub job_name: String,
     pub state: String,
     pub start_time: String,
@@ -35,7 +35,7 @@ pub struct JobInfo {
 /// Manages SLURM job submission, tracking, and status retrieval.
 #[derive(Debug, Default)]
 pub struct JobManager {
-    tracked_jobs: HashMap<u64, HashMap<String, String>>,
+    tracked_jobs: HashMap<JobId, HashMap<String, String>>,
 }
 
 impl JobManager {
@@ -74,16 +74,18 @@ impl JobManager {
             sbatch_script.to_string_lossy().to_string(),
         );
         metadata.insert("submitted".to_string(), "true".to_string());
-        self.tracked_jobs.insert(job_id, metadata);
+        self.tracked_jobs.insert(JobId::from(job_id), metadata);
 
         Ok(job_id)
     }
 
     /// Get the current status of a job.
-    pub fn get_job_status(&self, job_id: u64) -> JobStatus {
+    pub fn get_job_status(&self, job_id: JobId) -> JobStatus {
+        let id_str = job_id.to_string();
+
         // First try squeue for active jobs
         let result = run_slurm_command(
-            &["squeue", "-j", &job_id.to_string(), "-h", "-o", "%T"],
+            &["squeue", "-j", &id_str, "-h", "-o", "%T"],
             false,
         );
 
@@ -99,7 +101,7 @@ impl JobManager {
             &[
                 "sacct",
                 "-j",
-                &job_id.to_string(),
+                &id_str,
                 "--format=State",
                 "--noheader",
                 "--parsable2",
@@ -125,18 +127,20 @@ impl JobManager {
     }
 
     /// Get detailed information about a job including output paths.
-    pub fn get_job_info(&self, job_id: u64) -> JobInfo {
+    pub fn get_job_info(&self, job_id: JobId) -> JobInfo {
         let mut info = JobInfo {
             job_id,
             ..Default::default()
         };
+
+        let id_str = job_id.to_string();
 
         // Use sacct to get comprehensive job information
         let result = run_slurm_command(
             &[
                 "sacct",
                 "-j",
-                &job_id.to_string(),
+                &id_str,
                 "--format=JobID,JobName,State,Start,End,Elapsed,WorkDir,StdOut,StdErr",
                 "--parsable2",
             ],
@@ -152,7 +156,7 @@ impl JobManager {
                 info.start_time = parsed.get("Start").cloned().unwrap_or_default();
                 info.end_time = parsed.get("End").cloned().unwrap_or_default();
                 info.elapsed = parsed.get("Elapsed").cloned().unwrap_or_default();
-                
+
                 let work_dir = parsed.get("WorkDir").cloned().unwrap_or_default();
                 info.work_dir = PathBuf::from(&work_dir);
 
@@ -180,16 +184,21 @@ impl JobManager {
     }
 
     /// Resolve output path, replacing SLURM placeholders.
-    fn resolve_output_path(&self, path: &str, job_id: u64, work_dir: &str) -> PathBuf {
+    fn resolve_output_path(&self, path: &str, job_id: JobId, work_dir: &str) -> PathBuf {
         if path.is_empty() {
             return PathBuf::new();
         }
 
         // Replace SLURM placeholders
+        let array_index_str = job_id
+            .array_index
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "0".to_string());
+
         let resolved = path
             .replace("%j", &job_id.to_string())
-            .replace("%A", &job_id.to_string())
-            .replace("%a", "0"); // Default to 0 for non-array jobs
+            .replace("%A", &job_id.base_id.to_string())
+            .replace("%a", &array_index_str);
 
         let path = PathBuf::from(&resolved);
 
@@ -206,43 +215,53 @@ impl JobManager {
     }
 
     /// Find output file using common naming patterns.
-    fn find_output_file(&self, dir: &Path, job_id: u64, ext: &str) -> PathBuf {
-        // Try standard pattern
-        let standard = dir.join(format!("slurm-{}.{}", job_id, ext));
-        if standard.exists() {
-            return standard;
+    fn find_output_file(&self, dir: &Path, job_id: JobId, ext: &str) -> PathBuf {
+        // Try exact match with full job ID (e.g. slurm-8322_5.out or slurm-8322.out)
+        let exact = dir.join(format!("slurm-{}.{}", job_id, ext));
+        if exact.exists() {
+            return exact;
         }
 
-        // Try array job pattern
-        let array = dir.join(format!("slurm-{}_{}.{}", job_id, 0, ext));
-        if array.exists() {
-            return array;
+        // For array jobs, also try base_id pattern
+        if job_id.array_index.is_some() {
+            let base_pattern = dir.join(format!("slurm-{}.{}", job_id.base_id, ext));
+            if base_pattern.exists() {
+                return base_pattern;
+            }
         }
 
-        // Return standard pattern even if it doesn't exist yet
-        standard
+        // For non-array jobs, try array pattern with index 0
+        if job_id.array_index.is_none() {
+            let array = dir.join(format!("slurm-{}_{}.{}", job_id.base_id, 0, ext));
+            if array.exists() {
+                return array;
+            }
+        }
+
+        // Return exact pattern even if it doesn't exist yet
+        exact
     }
 
     /// List all currently tracked job IDs.
     #[allow(dead_code)]
-    pub fn list_tracked_jobs(&self) -> Vec<u64> {
+    pub fn list_tracked_jobs(&self) -> Vec<JobId> {
         self.tracked_jobs.keys().copied().collect()
     }
 
     /// Add a job to the tracking list.
-    pub fn add_tracked_job(&mut self, job_id: u64) {
+    pub fn add_tracked_job(&mut self, job_id: JobId) {
         self.tracked_jobs.entry(job_id).or_insert_with(HashMap::new);
     }
 
     /// Remove a job from the tracking list.
     #[allow(dead_code)]
-    pub fn remove_tracked_job(&mut self, job_id: u64) {
+    pub fn remove_tracked_job(&mut self, job_id: JobId) {
         self.tracked_jobs.remove(&job_id);
     }
 
     /// Check if a job is being tracked.
     #[allow(dead_code)]
-    pub fn is_tracking(&self, job_id: u64) -> bool {
+    pub fn is_tracking(&self, job_id: JobId) -> bool {
         self.tracked_jobs.contains_key(&job_id)
     }
 }
@@ -260,22 +279,42 @@ mod tests {
     #[test]
     fn test_add_remove_tracked_job() {
         let mut manager = JobManager::new();
-        
-        manager.add_tracked_job(12345);
-        assert!(manager.is_tracking(12345));
+        let job_id = JobId::from(12345);
+
+        manager.add_tracked_job(job_id);
+        assert!(manager.is_tracking(job_id));
         assert_eq!(manager.list_tracked_jobs().len(), 1);
-        
-        manager.remove_tracked_job(12345);
-        assert!(!manager.is_tracking(12345));
+
+        manager.remove_tracked_job(job_id);
+        assert!(!manager.is_tracking(job_id));
         assert!(manager.list_tracked_jobs().is_empty());
+    }
+
+    #[test]
+    fn test_add_remove_array_job() {
+        let mut manager = JobManager::new();
+        let job_id = JobId::new(8322, Some(5));
+
+        manager.add_tracked_job(job_id);
+        assert!(manager.is_tracking(job_id));
+        // A different array index should not be tracked
+        assert!(!manager.is_tracking(JobId::new(8322, Some(6))));
     }
 
     #[test]
     fn test_resolve_output_path() {
         let manager = JobManager::new();
-        
-        // Test placeholder replacement
-        let resolved = manager.resolve_output_path("slurm-%j.out", 12345, "/home/user");
+
+        // Test placeholder replacement for non-array job
+        let resolved = manager.resolve_output_path("slurm-%j.out", JobId::from(12345), "/home/user");
         assert!(resolved.to_string_lossy().contains("slurm-12345.out"));
+
+        // Test placeholder replacement for array job
+        let resolved = manager.resolve_output_path(
+            "slurm-%A_%a.out",
+            JobId::new(8322, Some(5)),
+            "/home/user",
+        );
+        assert!(resolved.to_string_lossy().contains("slurm-8322_5.out"));
     }
 }

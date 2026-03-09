@@ -23,7 +23,7 @@ fn main() -> Result<()> {
             cli::handle_list()?;
         }
         Commands::Stop { job_id } => {
-            cli::handle_stop(job_id)?;
+            cli::handle_stop(&job_id)?;
         }
     }
 

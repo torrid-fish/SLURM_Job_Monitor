@@ -3,7 +3,134 @@
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::fmt;
 use std::process::Command;
+use std::str::FromStr;
+
+/// A SLURM job identifier, supporting both regular jobs (e.g. `8322`) and
+/// array job tasks (e.g. `8322_5`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JobId {
+    pub base_id: u64,
+    pub array_index: Option<u32>,
+}
+
+impl JobId {
+    pub fn new(base_id: u64, array_index: Option<u32>) -> Self {
+        Self {
+            base_id,
+            array_index,
+        }
+    }
+}
+
+impl fmt::Display for JobId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.array_index {
+            Some(idx) => write!(f, "{}_{}", self.base_id, idx),
+            None => write!(f, "{}", self.base_id),
+        }
+    }
+}
+
+impl FromStr for JobId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // Strip .batch / .extern / .0 suffixes (step identifiers)
+        let base = s.split('.').next().unwrap_or(s);
+
+        if let Some((left, right)) = base.split_once('_') {
+            let base_id: u64 = left
+                .parse()
+                .with_context(|| format!("Invalid base job ID: {}", left))?;
+            let array_index: u32 = right
+                .parse()
+                .with_context(|| format!("Invalid array index: {}", right))?;
+            Ok(JobId::new(base_id, Some(array_index)))
+        } else {
+            let base_id: u64 = base
+                .parse()
+                .with_context(|| format!("Invalid job ID: {}", base))?;
+            Ok(JobId::new(base_id, None))
+        }
+    }
+}
+
+impl Ord for JobId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.base_id
+            .cmp(&other.base_id)
+            .then(self.array_index.cmp(&other.array_index))
+    }
+}
+
+impl PartialOrd for JobId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl From<u64> for JobId {
+    fn from(id: u64) -> Self {
+        Self {
+            base_id: id,
+            array_index: None,
+        }
+    }
+}
+
+/// Expand an array job into all its subtask `JobId`s by querying sacct.
+///
+/// If `base_id` is not an array job (or sacct fails), returns `vec![JobId::from(base_id)]`.
+pub fn expand_array_job(base_id: u64) -> Vec<JobId> {
+    let result = run_slurm_command(
+        &[
+            "sacct",
+            "-j",
+            &base_id.to_string(),
+            "--format=JobID",
+            "--noheader",
+            "--parsable2",
+        ],
+        false,
+    );
+
+    match result {
+        Ok(cmd_result) if cmd_result.return_code == 0 && !cmd_result.stdout.trim().is_empty() => {
+            let mut ids: Vec<JobId> = cmd_result
+                .stdout
+                .trim()
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        return None;
+                    }
+                    // Strip step suffixes (.batch, .extern, .0)
+                    let base = line.split('.').next()?;
+                    // Only keep entries that have an array index
+                    if base.contains('_') {
+                        base.parse::<JobId>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            ids.sort_unstable();
+            ids.dedup();
+
+            if ids.is_empty() {
+                // Not an array job
+                vec![JobId::from(base_id)]
+            } else {
+                ids
+            }
+        }
+        _ => vec![JobId::from(base_id)],
+    }
+}
 
 /// Result of running a SLURM command
 #[derive(Debug)]
@@ -170,8 +297,8 @@ pub fn parse_sacct_multiple_output(output: &str) -> Vec<HashMap<String, String>>
 
 /// Get all job IDs from sacct (recent jobs visible to the user).
 ///
-/// Returns a vector of job IDs sorted in descending order.
-pub fn get_all_job_ids_from_sacct() -> Vec<u64> {
+/// Returns a vector of `JobId`s sorted in descending order, preserving array indices.
+pub fn get_all_job_ids_from_sacct() -> Vec<JobId> {
     let result = run_slurm_command(
         &["sacct", "--format=JobID", "--noheader", "--parsable2"],
         false,
@@ -179,7 +306,7 @@ pub fn get_all_job_ids_from_sacct() -> Vec<u64> {
 
     match result {
         Ok(cmd_result) if cmd_result.return_code == 0 && !cmd_result.stdout.trim().is_empty() => {
-            let mut job_ids: Vec<u64> = cmd_result
+            let mut job_ids: Vec<JobId> = cmd_result
                 .stdout
                 .trim()
                 .lines()
@@ -188,15 +315,13 @@ pub fn get_all_job_ids_from_sacct() -> Vec<u64> {
                     if line.is_empty() {
                         return None;
                     }
-                    // Extract job ID (may be in format like "12345" or "12345.batch" or "12345_0")
-                    let job_id_str = line
-                        .split('|')
-                        .next()?
-                        .split('.')
-                        .next()?
-                        .split('_')
-                        .next()?;
-                    job_id_str.parse().ok()
+                    // Strip pipe-delimited fields (take first)
+                    let id_str = line.split('|').next()?;
+                    // Strip step suffixes (.batch, .extern)
+                    let base = id_str.split('.').next()?;
+                    // Skip bare step entries like "12345.batch" that resolve to just "12345"
+                    // when we already have "12345" or "12345_N"
+                    base.parse::<JobId>().ok()
                 })
                 .collect();
 
@@ -297,5 +422,52 @@ mod tests {
         assert_eq!(JobStatus::from_slurm_state("COMPLETED"), JobStatus::Completed);
         assert_eq!(JobStatus::from_slurm_state("FAILED"), JobStatus::Failed);
         assert_eq!(JobStatus::from_slurm_state("CANCELLED"), JobStatus::Failed);
+    }
+
+    #[test]
+    fn test_job_id_display() {
+        assert_eq!(JobId::from(8322).to_string(), "8322");
+        assert_eq!(JobId::new(8322, Some(5)).to_string(), "8322_5");
+        assert_eq!(JobId::new(8322, Some(0)).to_string(), "8322_0");
+    }
+
+    #[test]
+    fn test_job_id_from_str() {
+        assert_eq!("8322".parse::<JobId>().unwrap(), JobId::from(8322));
+        assert_eq!(
+            "8322_5".parse::<JobId>().unwrap(),
+            JobId::new(8322, Some(5))
+        );
+        assert_eq!(
+            "8322_0.batch".parse::<JobId>().unwrap(),
+            JobId::new(8322, Some(0))
+        );
+        assert_eq!(
+            "8322.extern".parse::<JobId>().unwrap(),
+            JobId::from(8322)
+        );
+        assert!("abc".parse::<JobId>().is_err());
+    }
+
+    #[test]
+    fn test_job_id_ordering() {
+        let mut ids = vec![
+            JobId::new(8322, Some(5)),
+            JobId::from(8322),
+            JobId::new(8322, Some(0)),
+            JobId::from(1000),
+            JobId::new(8322, Some(21)),
+        ];
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                JobId::from(1000),
+                JobId::from(8322),
+                JobId::new(8322, Some(0)),
+                JobId::new(8322, Some(5)),
+                JobId::new(8322, Some(21)),
+            ]
+        );
     }
 }

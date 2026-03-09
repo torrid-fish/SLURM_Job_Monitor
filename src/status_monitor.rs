@@ -1,7 +1,7 @@
 //! Status Monitor for polling SLURM job status.
 
 use crate::job_manager::{JobInfo, JobManager};
-use crate::utils::JobStatus;
+use crate::utils::{JobId, JobStatus};
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -11,7 +11,7 @@ use std::time::Duration;
 /// Status update message sent from the monitor thread to the UI.
 #[derive(Debug, Clone)]
 pub struct StatusUpdate {
-    pub job_id: u64,
+    pub job_id: JobId,
     pub status: JobStatus,
     pub info: JobInfo,
 }
@@ -20,9 +20,9 @@ pub struct StatusUpdate {
 #[derive(Debug)]
 pub enum MonitorCommand {
     /// Add a job to monitor
-    AddJob(u64),
+    AddJob(JobId),
     /// Remove a job from monitoring
-    RemoveJob(u64),
+    RemoveJob(JobId),
     /// Stop the monitor
     Stop,
 }
@@ -38,7 +38,7 @@ pub struct StatusMonitor {
     /// Shared job manager
     job_manager: Arc<Mutex<JobManager>>,
     /// Current status cache
-    current_statuses: Arc<Mutex<HashMap<u64, StatusUpdate>>>,
+    current_statuses: Arc<Mutex<HashMap<JobId, StatusUpdate>>>,
 }
 
 impl StatusMonitor {
@@ -62,7 +62,7 @@ impl StatusMonitor {
     /// # Arguments
     /// * `job_ids` - List of job IDs to monitor
     /// * `update_tx` - Channel to send status updates
-    pub fn start_monitoring(&mut self, job_ids: Vec<u64>, update_tx: Sender<StatusUpdate>) {
+    pub fn start_monitoring(&mut self, job_ids: Vec<JobId>, update_tx: Sender<StatusUpdate>) {
         // Stop any existing monitoring
         self.stop_monitoring();
 
@@ -112,11 +112,11 @@ impl StatusMonitor {
         command_rx: Receiver<MonitorCommand>,
         update_tx: Sender<StatusUpdate>,
         job_manager: Arc<Mutex<JobManager>>,
-        current_statuses: Arc<Mutex<HashMap<u64, StatusUpdate>>>,
+        current_statuses: Arc<Mutex<HashMap<JobId, StatusUpdate>>>,
         poll_interval: Duration,
-        initial_jobs: Vec<u64>,
+        initial_jobs: Vec<JobId>,
     ) {
-        let mut monitored_jobs: Vec<u64> = initial_jobs;
+        let mut monitored_jobs: Vec<JobId> = initial_jobs;
 
         loop {
             // Check for commands (non-blocking)
@@ -206,14 +206,14 @@ impl StatusMonitor {
     }
 
     /// Add a job to monitoring.
-    pub fn add_job_to_monitor(&self, job_id: u64) {
+    pub fn add_job_to_monitor(&self, job_id: JobId) {
         if let Some(ref tx) = self.command_tx {
             let _ = tx.send(MonitorCommand::AddJob(job_id));
         }
     }
 
     /// Remove a job from monitoring.
-    pub fn remove_job_from_monitor(&self, job_id: u64) {
+    pub fn remove_job_from_monitor(&self, job_id: JobId) {
         if let Some(ref tx) = self.command_tx {
             let _ = tx.send(MonitorCommand::RemoveJob(job_id));
         }
@@ -221,13 +221,13 @@ impl StatusMonitor {
 
     /// Get the current cached status for a job.
     #[allow(dead_code)]
-    pub fn get_status(&self, job_id: u64) -> Option<StatusUpdate> {
+    pub fn get_status(&self, job_id: JobId) -> Option<StatusUpdate> {
         self.current_statuses.lock().unwrap().get(&job_id).cloned()
     }
 
     /// Check if a job has finished (completed or failed).
     #[allow(dead_code)]
-    pub fn is_finished(&self, job_id: u64) -> bool {
+    pub fn is_finished(&self, job_id: JobId) -> bool {
         self.current_statuses
             .lock()
             .unwrap()
