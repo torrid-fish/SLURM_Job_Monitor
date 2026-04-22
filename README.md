@@ -44,12 +44,15 @@ slurm-monitor submit my_job.sh
 | Up/Down | Scroll focused panel |
 | PgUp/PgDn | Scroll by page |
 | Home/End | Jump to top/bottom |
-| n/p | Next/previous job |
+| n | Previous job (vim-style) |
+| p | Next job (vim-style) |
 | d | Remove job from view |
 | l | Cycle layout mode |
 | Enter | Open focused log file in editor |
 | q | Exit scroll mode / quit |
 | Ctrl+C | Quit |
+| Mouse click | Switch stdout/stderr panel focus |
+| Mouse scroll | Scroll focused panel |
 
 ## Commands
 
@@ -58,7 +61,7 @@ slurm-monitor submit my_job.sh
 | `submit <script>` | Submit a batch script and start monitoring |
 | `watch [job_ids...]` | Monitor jobs (all visible jobs if none specified) |
 | `list` | List all tracked jobs with status |
-| `stop <job_id>` | Stop monitoring a job (does not cancel it) |
+| `stop <job_id>` | Informational only — prints a message, does not actually unsubscribe from monitoring |
 
 Both `watch` and `submit` accept `--editor <cmd>` to override the editor for opening log files (Enter key). Resolution: CLI flag → `$VISUAL` → `$EDITOR` → `vim`.
 
