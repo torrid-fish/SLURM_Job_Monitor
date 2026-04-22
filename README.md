@@ -9,6 +9,7 @@ A real-time TUI for monitoring SLURM jobs -- see status, stdout, and stderr in o
 - Real-time status monitoring (QUEUED -> RUNNING -> COMPLETED/FAILED)
 - Live stdout/stderr tailing
 - Multi-job support with easy switching
+- Multiple layout modes (Horizontal, Vertical, Stacked, FullLog)
 - Auto-discover jobs from `sacct`
 - Single binary, no runtime dependencies
 
@@ -45,6 +46,7 @@ slurm-monitor submit my_job.sh
 | Home/End | Jump to top/bottom |
 | n/p | Next/previous job |
 | d | Remove job from view |
+| l | Cycle layout mode |
 | q | Exit scroll mode / quit |
 | Ctrl+C | Quit |
 

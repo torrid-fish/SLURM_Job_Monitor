@@ -1,6 +1,6 @@
 //! Rendering logic using Ratatui.
 
-use super::app::{App, FocusedPanel};
+use super::app::{App, FocusedPanel, LayoutMode};
 use crate::utils::JobStatus;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -12,37 +12,71 @@ use ratatui::{
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // Create main layout
-    let chunks = Layout::default()
+    let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(0),    // Body
-        ])
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
         .split(frame.area());
 
-    render_header(frame, app, chunks[0]);
+    render_header(frame, app, main_chunks[0]);
 
-    // Split body into status panel and output panel
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(35), // Status panel
-            Constraint::Percentage(65), // Output panel
-        ])
-        .split(chunks[1]);
+    let body_area = main_chunks[1];
 
-    render_status_panel(frame, &mut *app, body_chunks[0]);
-    render_output_panel(frame, app, body_chunks[1]);
+    match app.layout {
+        LayoutMode::Horizontal => render_horizontal(frame, app, body_area),
+        LayoutMode::Vertical => render_vertical(frame, app, body_area),
+        LayoutMode::Stacked => render_stacked(frame, app, body_area),
+        LayoutMode::FullLog => render_full_log(frame, app, body_area),
+    }
 }
 
-/// Render the header panel.
+fn render_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
+    let body_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    render_status_panel(frame, app, body_chunks[0]);
+    render_output_panel_vertical(frame, app, body_chunks[1]);
+}
+
+fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
+    let body_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+        .split(area);
+
+    render_status_panel(frame, app, body_chunks[0]);
+    render_output_panel_horizontal(frame, app, body_chunks[1]);
+}
+
+fn render_stacked(frame: &mut Frame, app: &mut App, area: Rect) {
+    let body_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(40)])
+        .split(area);
+
+    render_status_panel(frame, app, body_chunks[0]);
+    render_stdout_panel(frame, app, body_chunks[1]);
+    render_stderr_panel(frame, app, body_chunks[2]);
+}
+
+fn render_full_log(frame: &mut Frame, app: &mut App, area: Rect) {
+    let body_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    render_stdout_panel(frame, app, body_chunks[0]);
+    render_stderr_panel(frame, app, body_chunks[1]);
+}
+
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let job_count = app.jobs.len();
     let mut title = format!(
-        "SLURM Job Monitor - {} job{}",
+        "SLURM Job Monitor - {} job{} [{}]",
         job_count,
-        if job_count == 1 { "" } else { "s" }
+        if job_count == 1 { "" } else { "s" },
+        app.layout.name(),
     );
 
     if let Some(job_id) = app.current_job_id {
@@ -56,7 +90,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let help_text = "Press Ctrl+C to exit | Scroll: arrow keys | Tab: switch panels | Enter: open in editor";
+    let help_text = "Ctrl+C: exit | Scroll: arrows | Tab: switch panels | l: layout | Enter: editor";
 
     let header_text = vec![
         Line::from(Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
@@ -69,7 +103,6 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(header, area);
 }
 
-/// Render the status panel with job list.
 fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let panel_title = "Job Status (n: prev, p: next, d: delete)";
 
@@ -160,8 +193,7 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-/// Render the output panel with stdout and stderr.
-fn render_output_panel(frame: &mut Frame, app: &App, area: Rect) {
+fn render_output_panel_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.current_job_id.is_none() {
         let empty = Paragraph::new("Select a job to view output")
             .block(Block::default().title("Output").borders(Borders::ALL).border_style(Style::default().fg(Color::Green)));
@@ -169,7 +201,6 @@ fn render_output_panel(frame: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Split into stdout and stderr panels
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -179,7 +210,23 @@ fn render_output_panel(frame: &mut Frame, app: &App, area: Rect) {
     render_stderr_panel(frame, app, chunks[1]);
 }
 
-/// Render stdout panel.
+fn render_output_panel_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
+    if app.current_job_id.is_none() {
+        let empty = Paragraph::new("Select a job to view output")
+            .block(Block::default().title("Output").borders(Borders::ALL).border_style(Style::default().fg(Color::Green)));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    render_stdout_panel(frame, app, chunks[0]);
+    render_stderr_panel(frame, app, chunks[1]);
+}
+
 fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
     let job_id = match app.current_job_id {
         Some(id) => id,
@@ -242,7 +289,6 @@ fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render stderr panel.
 fn render_stderr_panel(frame: &mut Frame, app: &App, area: Rect) {
     let job_id = match app.current_job_id {
         Some(id) => id,
@@ -305,7 +351,6 @@ fn render_stderr_panel(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Get visible lines based on scroll position.
 fn get_visible_lines(lines: &[String], scroll_pos: usize, max_height: usize) -> Vec<String> {
     if lines.is_empty() {
         return Vec::new();

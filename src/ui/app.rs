@@ -14,6 +14,39 @@ pub enum FocusedPanel {
     Stderr,
 }
 
+/// Layout mode for the TUI
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    /// Left=status, Right top=stdout, Right bottom=stderr
+    Horizontal,
+    /// Top=status, Bottom left=stdout, Bottom right=stderr
+    Vertical,
+    /// Top=status, Middle=stdout, Bottom=stderr (all full width)
+    Stacked,
+    /// Top=stdout, Bottom=stderr (status info in header only, no status table)
+    FullLog,
+}
+
+impl LayoutMode {
+    pub fn next(self) -> Self {
+        match self {
+            LayoutMode::Horizontal => LayoutMode::Vertical,
+            LayoutMode::Vertical => LayoutMode::Stacked,
+            LayoutMode::Stacked => LayoutMode::FullLog,
+            LayoutMode::FullLog => LayoutMode::Horizontal,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LayoutMode::Horizontal => "Horizontal",
+            LayoutMode::Vertical => "Vertical",
+            LayoutMode::Stacked => "Stacked",
+            LayoutMode::FullLog => "FullLog",
+        }
+    }
+}
+
 impl FocusedPanel {
     pub fn toggle(&mut self) {
         *self = match self {
@@ -126,7 +159,7 @@ pub struct App {
     pub current_job_id: Option<JobId>,
     /// Which panel is focused
     pub focused_panel: FocusedPanel,
-    /// Whether the app should quit
+    pub layout: LayoutMode,
     pub should_quit: bool,
     /// Max visible lines per panel (cached, for backwards compatibility)
     pub max_visible_lines: usize,
@@ -150,6 +183,7 @@ impl App {
             jobs: HashMap::new(),
             current_job_id: None,
             focused_panel: FocusedPanel::Stdout,
+            layout: LayoutMode::Horizontal,
             should_quit: false,
             max_visible_lines: 20,
             stdout_panel_height: 20,
@@ -225,6 +259,10 @@ impl App {
     /// Switch focus between panels.
     pub fn switch_focus(&mut self) {
         self.focused_panel.toggle();
+    }
+
+    pub fn cycle_layout(&mut self) {
+        self.layout = self.layout.next();
     }
 
     /// Get the file path of the currently focused log panel (stdout or stderr).
@@ -392,43 +430,57 @@ impl App {
         }
     }
 
-    /// Update panel heights based on terminal size using exact same Layout as render.rs.
-    /// This ensures scroll calculations match what's actually rendered.
     pub fn update_panel_heights(&mut self, frame_area: Rect) {
-        // Replicate exact layout from render.rs:
-        // 1. Main vertical split: header (3 lines) + body
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // Body
-            ])
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(frame_area);
 
         let body_area = main_chunks[1];
 
-        // 2. Body horizontal split: 35% status + 65% output
-        let body_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(35), // Status panel
-                Constraint::Percentage(65), // Output panel
-            ])
-            .split(body_area);
+        match self.layout {
+            LayoutMode::Horizontal => {
+                let body_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                    .split(body_area);
+                let output_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(body_chunks[1]);
+                self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
+            }
+            LayoutMode::Vertical => {
+                let body_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+                    .split(body_area);
+                let output_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(body_chunks[1]);
+                self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
+            }
+            LayoutMode::Stacked => {
+                let body_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(40)])
+                    .split(body_area);
+                self.stdout_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_height = body_chunks[2].height.saturating_sub(2).max(1) as usize;
+            }
+            LayoutMode::FullLog => {
+                let body_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(body_area);
+                self.stdout_panel_height = body_chunks[0].height.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
+            }
+        }
 
-        let output_area = body_chunks[1];
-
-        // 3. Output vertical split: 50% stdout + 50% stderr
-        let output_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(output_area);
-
-        // 4. Inner height = panel height - 2 (for borders)
-        self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
-        self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
-
-        // Also update max_visible_lines for backwards compatibility
         self.max_visible_lines = self.stdout_panel_height;
     }
 
