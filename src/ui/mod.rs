@@ -3,7 +3,7 @@
 mod app;
 mod render;
 
-pub use app::App;
+pub use app::{App, FocusedPanel};
 #[allow(unused_imports)]
 pub use app::LayoutMode;
 pub use render::render;

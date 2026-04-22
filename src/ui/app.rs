@@ -148,32 +148,22 @@ impl JobData {
 
 /// Main application state
 pub struct App {
-    /// All job data
     pub jobs: HashMap<JobId, JobData>,
-    /// Currently selected job ID
     pub current_job_id: Option<JobId>,
-    /// Which panel is focused
     pub focused_panel: FocusedPanel,
     pub layout: LayoutMode,
     pub should_quit: bool,
-    /// Max visible lines per panel (cached, for backwards compatibility)
     pub max_visible_lines: usize,
-    /// Actual stdout panel inner height (set from render layout)
     pub stdout_panel_height: usize,
-    /// Actual stderr panel inner height (set from render layout)
     pub stderr_panel_height: usize,
-    /// Actual stdout panel inner width (set from render layout)
     pub stdout_panel_width: usize,
-    /// Actual stderr panel inner width (set from render layout)
     pub stderr_panel_width: usize,
-    /// Auto-discover new jobs
     pub auto_discover: bool,
-    /// Jobs that have been explicitly deleted by the user (to prevent re-adding via auto-discovery)
     pub deleted_jobs: HashSet<JobId>,
-    /// Table state for scroll-to-focus in the job list
     pub table_state: TableState,
-    /// Editor command to open log files (from --editor flag, $VISUAL, $EDITOR, or default "vim")
     pub editor: String,
+    pub stdout_panel_rect: Rect,
+    pub stderr_panel_rect: Rect,
 }
 
 impl App {
@@ -193,6 +183,8 @@ impl App {
             deleted_jobs: HashSet::new(),
             table_state: TableState::default(),
             editor,
+            stdout_panel_rect: Rect::default(),
+            stderr_panel_rect: Rect::default(),
         }
     }
 
@@ -453,6 +445,8 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_chunks[1]);
+                self.stdout_panel_rect = output_chunks[0];
+                self.stderr_panel_rect = output_chunks[1];
                 self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
                 self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
@@ -467,6 +461,8 @@ impl App {
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_chunks[1]);
+                self.stdout_panel_rect = output_chunks[0];
+                self.stderr_panel_rect = output_chunks[1];
                 self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
                 self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
@@ -477,6 +473,8 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(40)])
                     .split(body_area);
+                self.stdout_panel_rect = body_chunks[1];
+                self.stderr_panel_rect = body_chunks[2];
                 self.stdout_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = body_chunks[2].height.saturating_sub(2).max(1) as usize;
                 self.stdout_panel_width = body_chunks[1].width.saturating_sub(2).max(1) as usize;
@@ -487,6 +485,8 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_area);
+                self.stdout_panel_rect = body_chunks[0];
+                self.stderr_panel_rect = body_chunks[1];
                 self.stdout_panel_height = body_chunks[0].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
                 self.stdout_panel_width = body_chunks[0].width.saturating_sub(2).max(1) as usize;
@@ -495,6 +495,18 @@ impl App {
         }
 
         self.max_visible_lines = self.stdout_panel_height;
+    }
+
+    pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<FocusedPanel> {
+        use ratatui::layout::Position;
+        let pos = Position::new(col, row);
+        if self.stdout_panel_rect.contains(pos) {
+            Some(FocusedPanel::Stdout)
+        } else if self.stderr_panel_rect.contains(pos) {
+            Some(FocusedPanel::Stderr)
+        } else {
+            None
+        }
     }
 
     /// Check if current job is in scroll mode.

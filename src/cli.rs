@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind},
     execute, queue,
     terminal::{
         disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
@@ -212,7 +212,7 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, Hide)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -272,23 +272,23 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
+        DisableMouseCapture,
         Show
     )?;
 
     result
 }
 
-/// Suspend the TUI, open a file in the editor, then resume the TUI.
 fn suspend_and_open_editor(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     editor: &str,
     path: &std::path::Path,
 ) -> Result<()> {
-    // Suspend TUI: leave alternate screen, show cursor, disable raw mode
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
+        DisableMouseCapture,
         Show
     )?;
     terminal.clear()?;
@@ -318,6 +318,7 @@ fn suspend_and_open_editor(
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
+        EnableMouseCapture,
         Hide
     )?;
 
@@ -429,67 +430,86 @@ fn run_event_loop(
             .unwrap_or_else(|| Duration::from_secs(0));
 
         if crossterm::event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') => {
-                            if app.is_in_scroll_mode() {
-                                app.exit_scroll_mode();
-                            } else {
-                                app.should_quit = true;
-                            }
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
-                            app.should_quit = true;
-                        }
-                        KeyCode::Tab => {
-                            app.switch_focus();
-                        }
-                        KeyCode::Char('n') => {
-                            app.prev_job();
-                        }
-                        KeyCode::Char('p') => {
-                            app.next_job();
-                        }
-                        KeyCode::Char('d') => {
-                            if let Some(job_id) = app.current_job_id {
-                                status_monitor.remove_job_from_monitor(job_id);
-                                log_tailer.remove_file(&format!("stdout_{}", job_id));
-                                log_tailer.remove_file(&format!("stderr_{}", job_id));
-                                app.remove_current_job();
-                            }
-                        }
-                        KeyCode::Char('l') => {
-                            app.cycle_layout();
-                        }
-                        KeyCode::Up => {
-                            app.scroll_up(1);
-                        }
-                        KeyCode::Down => {
-                            app.scroll_down(1);
-                        }
-                        KeyCode::PageUp => {
-                            app.scroll_up(10);
-                        }
-                        KeyCode::PageDown => {
-                            app.scroll_down(10);
-                        }
-                        KeyCode::Home => {
-                            app.scroll_to_top();
-                        }
-                        KeyCode::End => {
-                            app.scroll_to_bottom();
-                        }
-                        KeyCode::Enter => {
-                            if let Some(path) = app.get_focused_file_path() {
-                                if path.exists() {
-                                    suspend_and_open_editor(terminal, &app.editor, &path)?;
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') => {
+                                if app.is_in_scroll_mode() {
+                                    app.exit_scroll_mode();
+                                } else {
+                                    app.should_quit = true;
                                 }
                             }
+                            KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                                app.should_quit = true;
+                            }
+                            KeyCode::Tab => {
+                                app.switch_focus();
+                            }
+                            KeyCode::Char('n') => {
+                                app.prev_job();
+                            }
+                            KeyCode::Char('p') => {
+                                app.next_job();
+                            }
+                            KeyCode::Char('d') => {
+                                if let Some(job_id) = app.current_job_id {
+                                    status_monitor.remove_job_from_monitor(job_id);
+                                    log_tailer.remove_file(&format!("stdout_{}", job_id));
+                                    log_tailer.remove_file(&format!("stderr_{}", job_id));
+                                    app.remove_current_job();
+                                }
+                            }
+                            KeyCode::Char('l') => {
+                                app.cycle_layout();
+                            }
+                            KeyCode::Up => {
+                                app.scroll_up(1);
+                            }
+                            KeyCode::Down => {
+                                app.scroll_down(1);
+                            }
+                            KeyCode::PageUp => {
+                                app.scroll_up(10);
+                            }
+                            KeyCode::PageDown => {
+                                app.scroll_down(10);
+                            }
+                            KeyCode::Home => {
+                                app.scroll_to_top();
+                            }
+                            KeyCode::End => {
+                                app.scroll_to_bottom();
+                            }
+                            KeyCode::Enter => {
+                                if let Some(path) = app.get_focused_file_path() {
+                                    if path.exists() {
+                                        suspend_and_open_editor(terminal, &app.editor, &path)?;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            if let Some(panel) = app.hit_test_panel(mouse.column, mouse.row) {
+                                app.focused_panel = panel;
+                            }
+                        }
+                        MouseEventKind::ScrollUp => {
+                            app.scroll_up(3);
+                        }
+                        MouseEventKind::ScrollDown => {
+                            app.scroll_down(3);
                         }
                         _ => {}
                     }
                 }
+                _ => {}
             }
         }
 
