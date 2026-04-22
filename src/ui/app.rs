@@ -5,6 +5,7 @@ use crate::utils::{JobId, JobStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// Which panel is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,22 +140,24 @@ pub struct App {
     pub deleted_jobs: HashSet<JobId>,
     /// Table state for scroll-to-focus in the job list
     pub table_state: TableState,
+    /// Editor command to open log files (from --editor flag, $VISUAL, $EDITOR, or default "vim")
+    pub editor: String,
 }
 
 impl App {
-    /// Create a new App instance.
-    pub fn new() -> Self {
+    pub fn new(editor: String) -> Self {
         Self {
             jobs: HashMap::new(),
             current_job_id: None,
             focused_panel: FocusedPanel::Stdout,
             should_quit: false,
-            max_visible_lines: 20, // Default, will be updated based on terminal size
-            stdout_panel_height: 20, // Default, will be updated from actual render layout
-            stderr_panel_height: 20, // Default, will be updated from actual render layout
+            max_visible_lines: 20,
+            stdout_panel_height: 20,
+            stderr_panel_height: 20,
             auto_discover: false,
             deleted_jobs: HashSet::new(),
             table_state: TableState::default(),
+            editor,
         }
     }
 
@@ -222,6 +225,21 @@ impl App {
     /// Switch focus between panels.
     pub fn switch_focus(&mut self) {
         self.focused_panel.toggle();
+    }
+
+    /// Get the file path of the currently focused log panel (stdout or stderr).
+    pub fn get_focused_file_path(&self) -> Option<PathBuf> {
+        let job_id = self.current_job_id?;
+        let job = self.jobs.get(&job_id)?;
+        let path = match self.focused_panel {
+            FocusedPanel::Stdout => &job.info.stdout_path,
+            FocusedPanel::Stderr => &job.info.stderr_path,
+        };
+        if path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(path.clone())
+        }
     }
 
     /// Switch to next job.
@@ -430,8 +448,14 @@ impl App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new()
+        Self::new(resolve_default_editor())
     }
+}
+
+fn resolve_default_editor() -> String {
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vim".to_string())
 }
 
 impl Default for JobStatus {

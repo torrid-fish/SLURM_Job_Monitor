@@ -13,11 +13,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Submit { script, no_watch } => {
-            cli::handle_submit(&script, no_watch)?;
+        Commands::Submit { script, no_watch, editor } => {
+            cli::handle_submit(&script, no_watch, editor.as_deref())?;
         }
-        Commands::Watch { job_ids } => {
-            cli::handle_watch(job_ids)?;
+        Commands::Watch { job_ids, editor } => {
+            cli::handle_watch(job_ids, editor.as_deref())?;
         }
         Commands::List => {
             cli::handle_list()?;

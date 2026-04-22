@@ -56,7 +56,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let help_text = "Press Ctrl+C to exit | Scroll with arrow keys | Tab to switch panels";
+    let help_text = "Press Ctrl+C to exit | Scroll: arrow keys | Tab: switch panels | Enter: open in editor";
 
     let header_text = vec![
         Line::from(Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),

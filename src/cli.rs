@@ -31,6 +31,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use std::io::{self, stdout};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -45,6 +46,16 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Resolve editor command: CLI flag > $VISUAL > $EDITOR > "vim"
+fn resolve_editor(cli_editor: Option<&str>) -> String {
+    if let Some(editor) = cli_editor {
+        return editor.to_string();
+    }
+    std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vim".to_string())
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Submit a SLURM job script and optionally start monitoring
@@ -54,12 +65,18 @@ pub enum Commands {
         /// Do not start monitoring after submission
         #[arg(long)]
         no_watch: bool,
+        /// Editor to open log files (default: $VISUAL, $EDITOR, or vim)
+        #[arg(long)]
+        editor: Option<String>,
     },
     /// Monitor one or more existing SLURM jobs
     Watch {
         /// Job IDs to monitor. Supports array jobs: "8322" expands all subtasks,
         /// "8322_5" monitors only that specific subtask.
         job_ids: Vec<String>,
+        /// Editor to open log files (default: $VISUAL, $EDITOR, or vim)
+        #[arg(long)]
+        editor: Option<String>,
     },
     /// List all currently tracked jobs
     List,
@@ -71,7 +88,8 @@ pub enum Commands {
 }
 
 /// Handle the submit command.
-pub fn handle_submit(script: &PathBuf, no_watch: bool) -> Result<()> {
+pub fn handle_submit(script: &PathBuf, no_watch: bool, editor: Option<&str>) -> Result<()> {
+    let editor = resolve_editor(editor);
     let mut job_manager = JobManager::new();
     let job_id = job_manager
         .submit_job(script, &[])
@@ -81,7 +99,7 @@ pub fn handle_submit(script: &PathBuf, no_watch: bool) -> Result<()> {
 
     if !no_watch {
         println!("Starting monitor...");
-        run_monitor(vec![JobId::from(job_id)], false)?;
+        run_monitor(vec![JobId::from(job_id)], false, &editor)?;
     } else {
         println!(
             "Job {} submitted. Use 'slurm-monitor watch {}' to monitor it.",
@@ -93,7 +111,8 @@ pub fn handle_submit(script: &PathBuf, no_watch: bool) -> Result<()> {
 }
 
 /// Handle the watch command.
-pub fn handle_watch(job_id_strs: Vec<String>) -> Result<()> {
+pub fn handle_watch(job_id_strs: Vec<String>, editor: Option<&str>) -> Result<()> {
+    let editor = resolve_editor(editor);
     let (job_ids, auto_discover) = if job_id_strs.is_empty() {
         println!("No job IDs provided. Fetching all visible jobs from sacct...");
         let all_jobs = get_all_job_ids_from_sacct();
@@ -148,7 +167,7 @@ pub fn handle_watch(job_id_strs: Vec<String>) -> Result<()> {
         (expanded, false)
     };
 
-    run_monitor(job_ids, auto_discover)?;
+    run_monitor(job_ids, auto_discover, &editor)?;
     Ok(())
 }
 
@@ -189,7 +208,7 @@ pub fn handle_stop(job_id_str: &str) -> Result<()> {
 }
 
 /// Run the monitor UI.
-fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool) -> Result<()> {
+fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -198,7 +217,7 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app state
-    let mut app = App::new();
+    let mut app = App::new(editor.to_string());
     app.auto_discover = auto_discover;
 
     // Initialize jobs
@@ -258,6 +277,57 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool) -> Result<()> {
     )?;
 
     result
+}
+
+/// Suspend the TUI, open a file in the editor, then resume the TUI.
+fn suspend_and_open_editor(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    editor: &str,
+    path: &std::path::Path,
+) -> Result<()> {
+    // Suspend TUI: leave alternate screen, show cursor, disable raw mode
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        Show
+    )?;
+    terminal.clear()?;
+
+    // Spawn editor
+    let parts: Vec<&str> = editor.split_whitespace().collect();
+    let (cmd, args) = match parts.split_first() {
+        Some((c, a)) => (*c, a.to_vec()),
+        None => anyhow::bail!("Empty editor command"),
+    };
+
+    let mut cmd_obj = Command::new(cmd);
+    if !args.is_empty() {
+        cmd_obj.args(&args);
+    }
+    cmd_obj.arg(path);
+
+    let status = cmd_obj.status().context("Failed to execute editor")?;
+
+    if !status.success() {
+        // Editor exited with error, but still resume TUI
+        eprintln!("Editor exited with error (press Enter to continue)");
+    }
+
+    // Resume TUI: re-enter alternate screen, hide cursor, enable raw mode
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        Hide
+    )?;
+
+    // Clear the terminal to avoid stale content
+    terminal.clear()?;
+
+    Ok(())
 }
 
 /// Main event loop.
@@ -409,6 +479,13 @@ fn run_event_loop(
                         }
                         KeyCode::End => {
                             app.scroll_to_bottom();
+                        }
+                        KeyCode::Enter => {
+                            if let Some(path) = app.get_focused_file_path() {
+                                if path.exists() {
+                                    suspend_and_open_editor(terminal, &app.editor, &path)?;
+                                }
+                            }
                         }
                         _ => {}
                     }
