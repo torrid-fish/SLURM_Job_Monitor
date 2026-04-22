@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute, queue,
     terminal::{
         disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
@@ -212,7 +212,7 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
+    execute!(stdout, EnterAlternateScreen, Hide)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -272,7 +272,6 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
         Show
     )?;
 
@@ -290,7 +289,6 @@ fn suspend_and_open_editor(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
         Show
     )?;
     terminal.clear()?;
@@ -320,7 +318,6 @@ fn suspend_and_open_editor(
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableMouseCapture,
         Hide
     )?;
 
