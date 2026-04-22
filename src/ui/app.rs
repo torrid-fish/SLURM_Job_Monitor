@@ -115,37 +115,32 @@ impl JobData {
     }
 
     /// Update stdout content
-    pub fn append_stdout(&mut self, content: &str, max_visible_lines: usize) {
+    pub fn append_stdout(&mut self, content: &str, max_visible_lines: usize, panel_width: usize) {
         self.stdout.push_str(content);
         self.stdout_lines = Self::process_log_content(&self.stdout);
 
-        // Auto-scroll to bottom if not in scroll mode
         if !self.stdout_scroll_mode {
-            self.scroll_stdout_to_bottom(max_visible_lines);
+            self.scroll_stdout_to_bottom(max_visible_lines, panel_width);
         }
     }
 
-    /// Update stderr content
-    pub fn append_stderr(&mut self, content: &str, max_visible_lines: usize) {
+    pub fn append_stderr(&mut self, content: &str, max_visible_lines: usize, panel_width: usize) {
         self.stderr.push_str(content);
         self.stderr_lines = Self::process_log_content(&self.stderr);
 
-        // Auto-scroll to bottom if not in scroll mode
         if !self.stderr_scroll_mode {
-            self.scroll_stderr_to_bottom(max_visible_lines);
+            self.scroll_stderr_to_bottom(max_visible_lines, panel_width);
         }
     }
 
-    /// Scroll stdout to bottom
-    pub fn scroll_stdout_to_bottom(&mut self, max_visible_lines: usize) {
-        let total = self.stdout_lines.len();
+    pub fn scroll_stdout_to_bottom(&mut self, max_visible_lines: usize, panel_width: usize) {
+        let total = wrap_lines_count(&self.stdout_lines, panel_width);
         self.stdout_scroll = total.saturating_sub(max_visible_lines);
         self.stdout_scroll_mode = false;
     }
 
-    /// Scroll stderr to bottom
-    pub fn scroll_stderr_to_bottom(&mut self, max_visible_lines: usize) {
-        let total = self.stderr_lines.len();
+    pub fn scroll_stderr_to_bottom(&mut self, max_visible_lines: usize, panel_width: usize) {
+        let total = wrap_lines_count(&self.stderr_lines, panel_width);
         self.stderr_scroll = total.saturating_sub(max_visible_lines);
         self.stderr_scroll_mode = false;
     }
@@ -167,6 +162,10 @@ pub struct App {
     pub stdout_panel_height: usize,
     /// Actual stderr panel inner height (set from render layout)
     pub stderr_panel_height: usize,
+    /// Actual stdout panel inner width (set from render layout)
+    pub stdout_panel_width: usize,
+    /// Actual stderr panel inner width (set from render layout)
+    pub stderr_panel_width: usize,
     /// Auto-discover new jobs
     pub auto_discover: bool,
     /// Jobs that have been explicitly deleted by the user (to prevent re-adding via auto-discovery)
@@ -188,6 +187,8 @@ impl App {
             max_visible_lines: 20,
             stdout_panel_height: 20,
             stderr_panel_height: 20,
+            stdout_panel_width: 80,
+            stderr_panel_width: 80,
             auto_discover: false,
             deleted_jobs: HashSet::new(),
             table_state: TableState::default(),
@@ -249,8 +250,8 @@ impl App {
     pub fn update_log(&mut self, job_id: JobId, log_type: &str, content: &str) {
         if let Some(job) = self.jobs.get_mut(&job_id) {
             match log_type {
-                "stdout" => job.append_stdout(content, self.stdout_panel_height),
-                "stderr" => job.append_stderr(content, self.stderr_panel_height),
+                "stdout" => job.append_stdout(content, self.stdout_panel_height, self.stdout_panel_width),
+                "stderr" => job.append_stderr(content, self.stderr_panel_height, self.stderr_panel_width),
                 _ => {}
             }
         }
@@ -319,7 +320,8 @@ impl App {
                 match self.focused_panel {
                     FocusedPanel::Stdout => {
                         let visible_lines = self.stdout_panel_height;
-                        let max_scroll = job.stdout_lines.len().saturating_sub(visible_lines);
+                        let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
+                        let max_scroll = total.saturating_sub(visible_lines);
                         if max_scroll == 0 {
                             return;
                         }
@@ -331,7 +333,8 @@ impl App {
                     }
                     FocusedPanel::Stderr => {
                         let visible_lines = self.stderr_panel_height;
-                        let max_scroll = job.stderr_lines.len().saturating_sub(visible_lines);
+                        let total = wrap_lines_count(&job.stderr_lines, self.stderr_panel_width);
+                        let max_scroll = total.saturating_sub(visible_lines);
                         if max_scroll == 0 {
                             return;
                         }
@@ -353,7 +356,8 @@ impl App {
                 match self.focused_panel {
                     FocusedPanel::Stdout => {
                         let visible_lines = self.stdout_panel_height;
-                        let max_scroll = job.stdout_lines.len().saturating_sub(visible_lines);
+                        let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
+                        let max_scroll = total.saturating_sub(visible_lines);
                         if max_scroll == 0 {
                             return;
                         }
@@ -367,7 +371,8 @@ impl App {
                     }
                     FocusedPanel::Stderr => {
                         let visible_lines = self.stderr_panel_height;
-                        let max_scroll = job.stderr_lines.len().saturating_sub(visible_lines);
+                        let total = wrap_lines_count(&job.stderr_lines, self.stderr_panel_width);
+                        let max_scroll = total.saturating_sub(visible_lines);
                         if max_scroll == 0 {
                             return;
                         }
@@ -408,10 +413,10 @@ impl App {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
                     FocusedPanel::Stdout => {
-                        job.scroll_stdout_to_bottom(self.stdout_panel_height);
+                        job.scroll_stdout_to_bottom(self.stdout_panel_height, self.stdout_panel_width);
                     }
                     FocusedPanel::Stderr => {
-                        job.scroll_stderr_to_bottom(self.stderr_panel_height);
+                        job.scroll_stderr_to_bottom(self.stderr_panel_height, self.stderr_panel_width);
                     }
                 }
             }
@@ -450,6 +455,8 @@ impl App {
                     .split(body_chunks[1]);
                 self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
+                self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_width = output_chunks[1].width.saturating_sub(2).max(1) as usize;
             }
             LayoutMode::Vertical => {
                 let body_chunks = Layout::default()
@@ -462,6 +469,8 @@ impl App {
                     .split(body_chunks[1]);
                 self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
+                self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_width = output_chunks[1].width.saturating_sub(2).max(1) as usize;
             }
             LayoutMode::Stacked => {
                 let body_chunks = Layout::default()
@@ -470,6 +479,8 @@ impl App {
                     .split(body_area);
                 self.stdout_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = body_chunks[2].height.saturating_sub(2).max(1) as usize;
+                self.stdout_panel_width = body_chunks[1].width.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_width = body_chunks[2].width.saturating_sub(2).max(1) as usize;
             }
             LayoutMode::FullLog => {
                 let body_chunks = Layout::default()
@@ -478,6 +489,8 @@ impl App {
                     .split(body_area);
                 self.stdout_panel_height = body_chunks[0].height.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
+                self.stdout_panel_width = body_chunks[0].width.saturating_sub(2).max(1) as usize;
+                self.stderr_panel_width = body_chunks[1].width.saturating_sub(2).max(1) as usize;
             }
         }
 
@@ -496,6 +509,42 @@ impl App {
         }
         false
     }
+}
+
+/// Count total visual lines after hard-wrapping at `max_width`.
+pub fn wrap_lines_count(lines: &[String], max_width: usize) -> usize {
+    if max_width == 0 {
+        return lines.len();
+    }
+    lines.iter().map(|line| {
+        if line.is_empty() {
+            1
+        } else {
+            let char_count = line.chars().count();
+            (char_count + max_width - 1) / max_width
+        }
+    }).sum()
+}
+
+/// Hard-wrap lines to fit within `max_width` characters.
+pub fn wrap_lines(lines: &[String], max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return lines.to_vec();
+    }
+    lines.iter().flat_map(|line| {
+        if line.is_empty() {
+            vec![String::new()]
+        } else {
+            let chars: Vec<char> = line.chars().collect();
+            if chars.len() <= max_width {
+                vec![line.clone()]
+            } else {
+                chars.chunks(max_width)
+                    .map(|chunk| chunk.iter().collect())
+                    .collect()
+            }
+        }
+    }).collect()
 }
 
 impl Default for App {

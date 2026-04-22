@@ -7,7 +7,7 @@ A real-time TUI for monitoring SLURM jobs -- see status, stdout, and stderr in o
 ## Features
 
 - Real-time status monitoring (QUEUED -> RUNNING -> COMPLETED/FAILED)
-- Live stdout/stderr tailing
+- Live stdout/stderr tailing with word-wrap
 - Multi-job support with easy switching
 - Multiple layout modes (Horizontal, Vertical, Stacked, FullLog)
 - Auto-discover jobs from `sacct`
@@ -47,6 +47,7 @@ slurm-monitor submit my_job.sh
 | n/p | Next/previous job |
 | d | Remove job from view |
 | l | Cycle layout mode |
+| Enter | Open focused log file in editor |
 | q | Exit scroll mode / quit |
 | Ctrl+C | Quit |
 
@@ -58,6 +59,8 @@ slurm-monitor submit my_job.sh
 | `watch [job_ids...]` | Monitor jobs (all visible jobs if none specified) |
 | `list` | List all tracked jobs with status |
 | `stop <job_id>` | Stop monitoring a job (does not cancel it) |
+
+Both `watch` and `submit` accept `--editor <cmd>` to override the editor for opening log files (Enter key). Resolution: CLI flag → `$VISUAL` → `$EDITOR` → `vim`.
 
 Run `slurm-monitor <command> --help` for detailed options.
 

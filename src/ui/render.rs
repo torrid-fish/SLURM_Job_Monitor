@@ -1,6 +1,6 @@
 //! Rendering logic using Ratatui.
 
-use super::app::{App, FocusedPanel, LayoutMode};
+use super::app::{wrap_lines, App, FocusedPanel, LayoutMode};
 use crate::utils::JobStatus;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -270,7 +270,9 @@ fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     // Calculate visible lines
     let inner_height = area.height.saturating_sub(2) as usize;
-    let visible_lines = get_visible_lines(&job.stdout_lines, job.stdout_scroll, inner_height);
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let wrapped_lines = wrap_lines(&job.stdout_lines, inner_width);
+    let visible_lines = get_visible_lines(&wrapped_lines, job.stdout_scroll, inner_height);
 
     let content = if visible_lines.is_empty() {
         "[No output yet - waiting for file updates...]".to_string()
@@ -332,7 +334,9 @@ fn render_stderr_panel(frame: &mut Frame, app: &App, area: Rect) {
 
     // Calculate visible lines
     let inner_height = area.height.saturating_sub(2) as usize;
-    let visible_lines = get_visible_lines(&job.stderr_lines, job.stderr_scroll, inner_height);
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let wrapped_lines = wrap_lines(&job.stderr_lines, inner_width);
+    let visible_lines = get_visible_lines(&wrapped_lines, job.stderr_scroll, inner_height);
 
     let content = if visible_lines.is_empty() {
         "[No output yet - waiting for file updates...]".to_string()
