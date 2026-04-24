@@ -73,7 +73,7 @@ fn render_full_log(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let job_count = app.jobs.len();
     let mut title = format!(
-        "SLURM Job Monitor - {} job{} [{}]",
+        "lazyslurm - {} job{} [{}]",
         job_count,
         if job_count == 1 { "" } else { "s" },
         app.layout.name(),
