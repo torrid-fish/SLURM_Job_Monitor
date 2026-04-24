@@ -1,6 +1,6 @@
 //! Job Manager for SLURM job lifecycle management.
 
-use crate::utils::{parse_job_id, parse_sacct_output, run_slurm_command, JobId, JobStatus};
+use crate::utils::{parse_sacct_output, run_slurm_command, JobId, JobStatus};
 
 /// Write debug message to file
 fn debug_log(msg: &str) {
@@ -13,7 +13,6 @@ fn debug_log(msg: &str) {
         let _ = writeln!(f, "{}", msg);
     }
 }
-use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -44,39 +43,6 @@ impl JobManager {
         Self {
             tracked_jobs: HashMap::new(),
         }
-    }
-
-    /// Submit a job using sbatch and return the job ID.
-    ///
-    /// # Arguments
-    /// * `sbatch_script` - Path to the SLURM batch script
-    /// * `extra_args` - Additional arguments to pass to sbatch
-    pub fn submit_job(&mut self, sbatch_script: &Path, extra_args: &[String]) -> Result<u64> {
-        if !sbatch_script.exists() {
-            anyhow::bail!("Script not found: {}", sbatch_script.display());
-        }
-
-        let mut cmd_args = vec!["sbatch"];
-        let extra_args_refs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
-        cmd_args.extend(extra_args_refs);
-        cmd_args.push(sbatch_script.to_str().unwrap_or(""));
-
-        let result = run_slurm_command(&cmd_args, true)
-            .with_context(|| format!("Failed to submit job: {}", sbatch_script.display()))?;
-
-        let job_id = parse_job_id(&result.stdout)
-            .ok_or_else(|| anyhow::anyhow!("Could not parse job ID from sbatch output"))?;
-
-        // Track the job
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "script".to_string(),
-            sbatch_script.to_string_lossy().to_string(),
-        );
-        metadata.insert("submitted".to_string(), "true".to_string());
-        self.tracked_jobs.insert(JobId::from(job_id), metadata);
-
-        Ok(job_id)
     }
 
     /// Get the current status of a job.

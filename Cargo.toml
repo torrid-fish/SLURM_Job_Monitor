@@ -1,13 +1,13 @@
 [package]
-name = "slurm-monitor"
+name = "lazyslurm"
 version = "0.1.0"
 edition = "2021"
 description = "A CLI tool for real-time monitoring of SLURM jobs"
-authors = ["SLURM Monitor Contributors"]
+authors = ["lazyslurm Contributors"]
 license = "MIT"
 
 [[bin]]
-name = "slurm-monitor"
+name = "lazyslurm"
 path = "src/main.rs"
 
 [dependencies]
@@ -24,9 +24,6 @@ notify = "6.1"
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"
-
-# Regex for parsing SLURM output
-regex = "1.10"
 
 [profile.release]
 opt-level = 3

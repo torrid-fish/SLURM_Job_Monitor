@@ -1,7 +1,6 @@
 //! Utility functions for SLURM command execution and output parsing.
 
 use anyhow::{Context, Result};
-use regex::Regex;
 use std::collections::HashMap;
 use std::fmt;
 use std::process::Command;
@@ -181,16 +180,6 @@ pub fn run_slurm_command_with_timeout(
     }
 
     Ok(result)
-}
-
-/// Parse job ID from sbatch output.
-///
-/// Typical sbatch output: "Submitted batch job 12345"
-pub fn parse_job_id(sbatch_output: &str) -> Option<u64> {
-    let re = Regex::new(r"Submitted batch job (\d+)").ok()?;
-    re.captures(sbatch_output)
-        .and_then(|caps| caps.get(1))
-        .and_then(|m| m.as_str().parse().ok())
 }
 
 /// Parse squeue output for a single job.
@@ -392,19 +381,6 @@ impl std::fmt::Display for JobStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_parse_job_id() {
-        assert_eq!(
-            parse_job_id("Submitted batch job 12345"),
-            Some(12345)
-        );
-        assert_eq!(
-            parse_job_id("Submitted batch job 999999999"),
-            Some(999999999)
-        );
-        assert_eq!(parse_job_id("Invalid output"), None);
-    }
 
     #[test]
     fn test_parse_sacct_output() {

@@ -1,4 +1,4 @@
-# SLURM Job Monitor
+# lazyslurm
 
 A real-time TUI for monitoring SLURM jobs -- see status, stdout, and stderr in one place.
 
@@ -20,21 +20,22 @@ A real-time TUI for monitoring SLURM jobs -- see status, stdout, and stderr in o
 ```bash
 cargo install --path .
 # or
-cargo build --release && cp target/release/slurm-monitor ~/.local/bin/
+cargo build --release && cp target/release/lazyslurm ~/.local/bin/
 ```
 
 ### Usage
 
 ```bash
 # Monitor all your jobs (auto-discovers from sacct)
-slurm-monitor watch
+lazyslurm
 
 # Monitor specific jobs
-slurm-monitor watch 12345 12346
-
-# Submit and monitor
-slurm-monitor submit my_job.sh
+lazyslurm 12345 12346
 ```
+
+Pass `--editor <cmd>` to override the editor used when opening log files with Enter. Resolution: `--editor` flag → `$VISUAL` → `$EDITOR` → `vim`.
+
+Run `lazyslurm --help` for detailed options.
 
 ## UI Controls
 
@@ -53,19 +54,6 @@ slurm-monitor submit my_job.sh
 | Ctrl+C | Quit |
 | Mouse click | Switch stdout/stderr panel focus |
 | Mouse scroll | Scroll focused panel |
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `submit <script>` | Submit a batch script and start monitoring |
-| `watch [job_ids...]` | Monitor jobs (all visible jobs if none specified) |
-| `list` | List all tracked jobs with status |
-| `stop <job_id>` | Informational only — prints a message, does not actually unsubscribe from monitoring |
-
-Both `watch` and `submit` accept `--editor <cmd>` to override the editor for opening log files (Enter key). Resolution: CLI flag → `$VISUAL` → `$EDITOR` → `vim`.
-
-Run `slurm-monitor <command> --help` for detailed options.
 
 ## Troubleshooting
 

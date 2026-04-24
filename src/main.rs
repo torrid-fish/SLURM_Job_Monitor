@@ -7,25 +7,9 @@ mod utils;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::Cli;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
-    match cli.command {
-        Commands::Submit { script, no_watch, editor } => {
-            cli::handle_submit(&script, no_watch, editor.as_deref())?;
-        }
-        Commands::Watch { job_ids, editor } => {
-            cli::handle_watch(job_ids, editor.as_deref())?;
-        }
-        Commands::List => {
-            cli::handle_list()?;
-        }
-        Commands::Stop { job_id } => {
-            cli::handle_stop(&job_id)?;
-        }
-    }
-
-    Ok(())
+    cli::handle_watch(cli.job_ids, cli.editor.as_deref())
 }

@@ -8,7 +8,7 @@ fn debug_log(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/slurm_monitor_debug.log")
+        .open("/tmp/lazyslurm_debug.log")
     {
         let _ = writeln!(f, "{}", msg);
     }
@@ -18,7 +18,7 @@ use crate::status_monitor::{StatusMonitor, StatusUpdate};
 use crate::ui::{self, App};
 use crate::utils::{expand_array_job, get_all_job_ids_from_sacct, JobId};
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use crossterm::{
     cursor::{Hide, Show},
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind},
@@ -30,20 +30,24 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use std::io::{self, stdout};
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// SLURM Job Monitor - Real-time monitoring tool for SLURM jobs.
+/// lazyslurm - Real-time monitoring tool for SLURM jobs.
 #[derive(Parser)]
-#[command(name = "slurm-monitor")]
+#[command(name = "lazyslurm")]
 #[command(version = "0.1.0")]
 #[command(about = "Real-time monitoring tool for SLURM jobs")]
 pub struct Cli {
-    #[command(subcommand)]
-    pub command: Commands,
+    /// Job IDs to monitor. Supports array jobs: "8322" expands all subtasks,
+    /// "8322_5" monitors only that specific subtask. If empty, auto-discovers
+    /// all visible jobs from sacct and watches for new jobs.
+    pub job_ids: Vec<String>,
+    /// Editor to open log files (default: $VISUAL, $EDITOR, or vim)
+    #[arg(long)]
+    pub editor: Option<String>,
 }
 
 /// Resolve editor command: CLI flag > $VISUAL > $EDITOR > "vim"
@@ -54,60 +58,6 @@ fn resolve_editor(cli_editor: Option<&str>) -> String {
     std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vim".to_string())
-}
-
-#[derive(Subcommand)]
-pub enum Commands {
-    /// Submit a SLURM job script and optionally start monitoring
-    Submit {
-        /// Path to the SLURM batch script
-        script: PathBuf,
-        /// Do not start monitoring after submission
-        #[arg(long)]
-        no_watch: bool,
-        /// Editor to open log files (default: $VISUAL, $EDITOR, or vim)
-        #[arg(long)]
-        editor: Option<String>,
-    },
-    /// Monitor one or more existing SLURM jobs
-    Watch {
-        /// Job IDs to monitor. Supports array jobs: "8322" expands all subtasks,
-        /// "8322_5" monitors only that specific subtask.
-        job_ids: Vec<String>,
-        /// Editor to open log files (default: $VISUAL, $EDITOR, or vim)
-        #[arg(long)]
-        editor: Option<String>,
-    },
-    /// List all currently tracked jobs
-    List,
-    /// Stop monitoring a specific job (does not cancel the job)
-    Stop {
-        /// Job ID to stop monitoring (e.g. "8322" or "8322_5")
-        job_id: String,
-    },
-}
-
-/// Handle the submit command.
-pub fn handle_submit(script: &PathBuf, no_watch: bool, editor: Option<&str>) -> Result<()> {
-    let editor = resolve_editor(editor);
-    let mut job_manager = JobManager::new();
-    let job_id = job_manager
-        .submit_job(script, &[])
-        .context("Failed to submit job")?;
-
-    println!("Submitted job {}", job_id);
-
-    if !no_watch {
-        println!("Starting monitor...");
-        run_monitor(vec![JobId::from(job_id)], false, &editor)?;
-    } else {
-        println!(
-            "Job {} submitted. Use 'slurm-monitor watch {}' to monitor it.",
-            job_id, job_id
-        );
-    }
-
-    Ok(())
 }
 
 /// Handle the watch command.
@@ -168,42 +118,6 @@ pub fn handle_watch(job_id_strs: Vec<String>, editor: Option<&str>) -> Result<()
     };
 
     run_monitor(job_ids, auto_discover, &editor)?;
-    Ok(())
-}
-
-/// Handle the list command.
-pub fn handle_list() -> Result<()> {
-    let job_manager = JobManager::new();
-    let all_jobs = get_all_job_ids_from_sacct();
-
-    if all_jobs.is_empty() {
-        println!("No tracked jobs");
-        return Ok(());
-    }
-
-    println!("Tracked jobs:");
-    for job_id in all_jobs {
-        let status = job_manager.get_job_status(job_id);
-        let info = job_manager.get_job_info(job_id);
-        let job_name = if info.job_name.is_empty() {
-            "N/A".to_string()
-        } else {
-            info.job_name
-        };
-        println!("  {}: {} - {}", job_id, status, job_name);
-    }
-
-    Ok(())
-}
-
-/// Handle the stop command.
-pub fn handle_stop(job_id_str: &str) -> Result<()> {
-    let job_id: JobId = job_id_str
-        .parse()
-        .with_context(|| format!("Invalid job ID: {}", job_id_str))?;
-    println!("Stopped tracking job {}", job_id);
-    println!("Note: This command is informational only in the Rust version.");
-    println!("The job continues running on SLURM.");
     Ok(())
 }
 
