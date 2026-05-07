@@ -14,6 +14,7 @@ fn debug_log(msg: &str) {
     }
 }
 use crate::log_tailer::{LogTailer, LogUpdate};
+use crate::partition_monitor::{fetch_partition_queue, PartitionMonitor, PartitionUpdate};
 use crate::status_monitor::{StatusMonitor, StatusUpdate};
 use crate::ui::{self, App};
 use crate::utils::{expand_array_job, get_all_job_ids_from_sacct, JobId};
@@ -142,6 +143,7 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     // Create channels for updates
     let (status_tx, status_rx) = mpsc::channel();
     let (log_tx, log_rx) = mpsc::channel();
+    let (part_tx, part_rx) = mpsc::channel();
 
     // Create job manager
     let job_manager = Arc::new(Mutex::new(JobManager::new()));
@@ -156,6 +158,10 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     // Start log tailer
     let mut log_tailer = LogTailer::new(1.0);
     log_tailer.start_monitoring(log_tx.clone());
+
+    // Start partition monitor (system-wide view).
+    let mut partition_monitor = PartitionMonitor::new(5.0);
+    partition_monitor.start(part_tx);
 
     // Add initial log files to monitor
     for &job_id in &initial_job_ids {
@@ -174,6 +180,7 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
         &mut app,
         status_rx,
         log_rx,
+        part_rx,
         &job_manager,
         &log_tailer,
         &status_monitor,
@@ -182,6 +189,7 @@ fn run_monitor(initial_job_ids: Vec<JobId>, auto_discover: bool, editor: &str) -
     // Cleanup
     status_monitor.stop_monitoring();
     log_tailer.stop_monitoring();
+    partition_monitor.stop();
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -248,6 +256,7 @@ fn run_event_loop(
     app: &mut App,
     status_rx: Receiver<StatusUpdate>,
     log_rx: Receiver<LogUpdate>,
+    part_rx: Receiver<PartitionUpdate>,
     job_manager: &Arc<Mutex<JobManager>>,
     log_tailer: &LogTailer,
     status_monitor: &StatusMonitor,
@@ -307,6 +316,25 @@ fn run_event_loop(
                     debug_log(&format!("cli: updating log for job {} type {}", job_id, log_type));
                     app.update_log(job_id, log_type, &update.content);
                 }
+            }
+        }
+
+        // Drain partition updates (keep only the latest snapshot).
+        let mut latest_part: Option<PartitionUpdate> = None;
+        while let Ok(u) = part_rx.try_recv() {
+            latest_part = Some(u);
+        }
+        if let Some(u) = latest_part {
+            app.partitions = u.partitions;
+            app.partition_total_running = u.total_running;
+            app.partition_total_pending = u.total_pending;
+            app.resort_partitions();
+            // If we're drilled into a partition queue, refresh it on this tick
+            // so the pending list stays roughly in sync with the partition view.
+            if let Some(p) = app.partition_queue_for.clone() {
+                let jobs = fetch_partition_queue(&p);
+                app.refresh_partition_queue(jobs);
+                app.resort_partition_queue();
             }
         }
 
@@ -400,10 +428,23 @@ fn run_event_loop(
                                 app.scroll_to_bottom();
                             }
                             KeyCode::Enter => {
-                                if let Some(path) = app.get_focused_file_path() {
+                                if app.focused_panel == crate::ui::app::FocusBlock::Partitions
+                                    && !app.in_partition_queue_mode()
+                                {
+                                    if let Some(name) = app.selected_partition_name().map(|s| s.to_string()) {
+                                        let jobs = fetch_partition_queue(&name);
+                                        app.open_partition_queue(name, jobs);
+                                        app.resort_partition_queue();
+                                    }
+                                } else if let Some(path) = app.get_focused_file_path() {
                                     if path.exists() {
                                         suspend_and_open_editor(terminal, &app.editor, &path)?;
                                     }
+                                }
+                            }
+                            KeyCode::Esc | KeyCode::Backspace => {
+                                if app.in_partition_queue_mode() {
+                                    app.close_partition_queue();
                                 }
                             }
                             _ => {}
@@ -416,8 +457,18 @@ fn run_event_loop(
                             if let Some(panel) = app.hit_test_panel(mouse.column, mouse.row) {
                                 app.focused_panel = panel;
                                 if panel == crate::ui::app::FocusBlock::JobList {
-                                    if let Some(jid) = app.joblist_row_to_job(mouse.column, mouse.row) {
+                                    if let Some(col) = app.hit_test_joblist_header(mouse.column, mouse.row) {
+                                        app.cycle_joblist_sort(col);
+                                    } else if let Some(jid) = app.joblist_row_to_job(mouse.column, mouse.row) {
                                         app.current_job_id = Some(jid);
+                                    }
+                                } else if panel == crate::ui::app::FocusBlock::Partitions {
+                                    if let Some(col) = app.hit_test_partition_header(mouse.column, mouse.row) {
+                                        if app.in_partition_queue_mode() {
+                                            app.cycle_partition_queue_sort(col);
+                                        } else {
+                                            app.cycle_partition_sort(col);
+                                        }
                                     }
                                 }
                             }

@@ -1,6 +1,7 @@
 mod cli;
 mod job_manager;
 mod log_tailer;
+mod partition_monitor;
 mod status_monitor;
 mod ui;
 mod utils;

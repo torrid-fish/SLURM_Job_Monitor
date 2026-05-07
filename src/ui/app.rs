@@ -1,6 +1,7 @@
 //! Application state management for the TUI.
 
 use crate::job_manager::JobInfo;
+use crate::partition_monitor::{PartitionInfo, PendingJob};
 use crate::utils::{JobId, JobStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::TableState;
@@ -14,6 +15,8 @@ pub enum FocusBlock {
     Details,
     Stdout,
     Stderr,
+    /// System-wide partition / queue overview panel (third panel).
+    Partitions,
 }
 
 impl FocusBlock {
@@ -22,7 +25,7 @@ impl FocusBlock {
         match self {
             FocusBlock::Details => RightTab::Details,
             FocusBlock::Stdout | FocusBlock::Stderr => RightTab::Output,
-            FocusBlock::JobList => RightTab::Output,
+            FocusBlock::JobList | FocusBlock::Partitions => RightTab::Output,
         }
     }
 }
@@ -34,18 +37,27 @@ pub enum RightTab {
     Output,
 }
 
+/// Sort state for a clickable table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SortState {
+    pub column: usize,
+    pub ascending: bool,
+}
+
 /// Backwards-compatible alias for the legacy name.
 pub type FocusedPanel = FocusBlock;
 
 
 impl FocusBlock {
-    /// Cycle Tab key forward: JobList → Details → Stdout → Stderr → JobList.
+    /// Cycle Tab key forward.
+    /// JobList → Details → Stdout → Stderr → Partitions → JobList.
     pub fn next(self) -> Self {
         match self {
             FocusBlock::JobList => FocusBlock::Details,
             FocusBlock::Details => FocusBlock::Stdout,
             FocusBlock::Stdout => FocusBlock::Stderr,
-            FocusBlock::Stderr => FocusBlock::JobList,
+            FocusBlock::Stderr => FocusBlock::Partitions,
+            FocusBlock::Partitions => FocusBlock::JobList,
         }
     }
 
@@ -169,6 +181,29 @@ pub struct App {
     pub right_panel_rect: Rect,
     pub details_scroll: u16,
     pub details_scroll_max: u16,
+
+    // Partitions panel (third panel) — system-wide overview.
+    pub partitions: Vec<PartitionInfo>,
+    pub partition_total_running: usize,
+    pub partition_total_pending: usize,
+    pub partition_table_state: TableState,
+    pub partitions_panel_rect: Rect,
+    /// True when the panel is hidden because the terminal is too short.
+    pub partitions_collapsed: bool,
+
+    /// Drill-down: when `Some`, the panel shows pending jobs on this partition
+    /// instead of the partition list. Esc/Backspace returns to the list.
+    pub partition_queue_for: Option<String>,
+    pub partition_queue: Vec<PendingJob>,
+    pub partition_queue_state: TableState,
+
+    // Sort state + click-rects (per column header) for the clickable tables.
+    pub partition_sort: SortState,
+    pub partition_queue_sort: SortState,
+    pub joblist_sort: SortState,
+    pub partition_header_rects: Vec<Rect>,
+    pub partition_queue_header_rects: Vec<Rect>,
+    pub joblist_header_rects: Vec<Rect>,
 }
 
 impl App {
@@ -197,7 +232,217 @@ impl App {
             right_panel_rect: Rect::default(),
             details_scroll: 0,
             details_scroll_max: 0,
+            partitions: Vec::new(),
+            partition_total_running: 0,
+            partition_total_pending: 0,
+            partition_table_state: TableState::default(),
+            partitions_panel_rect: Rect::default(),
+            partitions_collapsed: false,
+            partition_queue_for: None,
+            partition_queue: Vec::new(),
+            partition_queue_state: TableState::default(),
+            // Defaults match the original sort orders so behavior doesn't
+            // change until the user clicks a different header.
+            partition_sort: SortState { column: 3, ascending: true }, // Min-Wait asc
+            partition_queue_sort: SortState { column: 3, ascending: false }, // Prio desc
+            joblist_sort: SortState { column: 0, ascending: false }, // Job ID desc (newest first)
+            partition_header_rects: Vec::new(),
+            partition_queue_header_rects: Vec::new(),
+            joblist_header_rects: Vec::new(),
         }
+    }
+
+    /// Click on a partition table header: toggle direction if same column,
+    /// otherwise switch to that column with a sensible default direction.
+    pub fn cycle_partition_sort(&mut self, column: usize) {
+        if self.partition_sort.column == column {
+            self.partition_sort.ascending = !self.partition_sort.ascending;
+        } else {
+            // Numeric / wait columns default desc-feeling, but Min-Wait wants asc.
+            let asc = matches!(column, 0 | 3 | 4); // Partition, Min-Wait, States
+            self.partition_sort = SortState { column, ascending: asc };
+        }
+        self.resort_partitions();
+    }
+
+    pub fn cycle_partition_queue_sort(&mut self, column: usize) {
+        if self.partition_queue_sort.column == column {
+            self.partition_queue_sort.ascending = !self.partition_queue_sort.ascending;
+        } else {
+            // Priority/Nodes/CPUs default descending, others ascending.
+            let desc = matches!(column, 3 | 5 | 6);
+            self.partition_queue_sort = SortState {
+                column,
+                ascending: !desc,
+            };
+        }
+        self.resort_partition_queue();
+    }
+
+    pub fn resort_partitions(&mut self) {
+        let s = self.partition_sort;
+        self.partitions.sort_by(|a, b| {
+            let ord = match s.column {
+                0 => a.name.cmp(&b.name),
+                1 => a
+                    .free_nodes
+                    .cmp(&b.free_nodes)
+                    .then(a.total_nodes.cmp(&b.total_nodes)),
+                2 => a.pending_jobs.cmp(&b.pending_jobs),
+                3 => {
+                    fn rank(p: &PartitionInfo) -> (u8, i64) {
+                        if p.is_down {
+                            (3, 0)
+                        } else {
+                            match p.min_wait_secs {
+                                Some(0) => (0, 0),
+                                Some(s) => (1, s),
+                                None => (2, 0),
+                            }
+                        }
+                    }
+                    rank(a).cmp(&rank(b))
+                }
+                4 => a.states.cmp(&b.states),
+                _ => std::cmp::Ordering::Equal,
+            };
+            // Tie-break by name for stability.
+            let ord = ord.then_with(|| a.name.cmp(&b.name));
+            if s.ascending {
+                ord
+            } else {
+                ord.reverse()
+            }
+        });
+    }
+
+    pub fn resort_partition_queue(&mut self) {
+        let s = self.partition_queue_sort;
+        self.partition_queue.sort_by(|a, b| {
+            let ord = match s.column {
+                0 => parse_int_prefix(&a.job_id).cmp(&parse_int_prefix(&b.job_id)),
+                1 => a.user.cmp(&b.user),
+                2 => a.name.cmp(&b.name),
+                3 => {
+                    let pa: i64 = a.priority.parse().unwrap_or(0);
+                    let pb: i64 = b.priority.parse().unwrap_or(0);
+                    pa.cmp(&pb)
+                }
+                4 => a.time_limit.cmp(&b.time_limit),
+                5 => {
+                    let na: i64 = a.nodes.parse().unwrap_or(0);
+                    let nb: i64 = b.nodes.parse().unwrap_or(0);
+                    na.cmp(&nb)
+                }
+                6 => {
+                    let ca: i64 = a.cpus.parse().unwrap_or(0);
+                    let cb: i64 = b.cpus.parse().unwrap_or(0);
+                    ca.cmp(&cb)
+                }
+                7 => a.reason.cmp(&b.reason),
+                _ => std::cmp::Ordering::Equal,
+            };
+            let ord = ord.then_with(|| a.job_id.cmp(&b.job_id));
+            if s.ascending {
+                ord
+            } else {
+                ord.reverse()
+            }
+        });
+    }
+
+    /// Hit-test the partition / queue header row. Returns the column index that
+    /// was clicked, if any.
+    pub fn hit_test_partition_header(&self, col: u16, row: u16) -> Option<usize> {
+        use ratatui::layout::Position;
+        let pos = Position::new(col, row);
+        let rects = if self.in_partition_queue_mode() {
+            &self.partition_queue_header_rects
+        } else {
+            &self.partition_header_rects
+        };
+        rects.iter().position(|r| r.contains(pos))
+    }
+
+    /// Name of the currently-highlighted partition row, if any.
+    pub fn selected_partition_name(&self) -> Option<&str> {
+        let idx = self.partition_table_state.selected()?;
+        self.partitions.get(idx).map(|p| p.name.as_str())
+    }
+
+    /// Whether the partitions panel is showing the pending-job drill-down.
+    pub fn in_partition_queue_mode(&self) -> bool {
+        self.partition_queue_for.is_some()
+    }
+
+    /// Enter drill-down for a partition (replaces the list with pending jobs).
+    pub fn open_partition_queue(&mut self, partition: String, jobs: Vec<PendingJob>) {
+        self.partition_queue_for = Some(partition);
+        self.partition_queue = jobs;
+        self.partition_queue_state.select(if self.partition_queue.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+    }
+
+    /// Replace the queue contents in place (used by background refresh).
+    pub fn refresh_partition_queue(&mut self, jobs: Vec<PendingJob>) {
+        let prev_sel = self.partition_queue_state.selected();
+        self.partition_queue = jobs;
+        let len = self.partition_queue.len();
+        let new_sel = match (prev_sel, len) {
+            (_, 0) => None,
+            (Some(i), n) => Some(i.min(n - 1)),
+            (None, _) => Some(0),
+        };
+        self.partition_queue_state.select(new_sel);
+    }
+
+    pub fn close_partition_queue(&mut self) {
+        self.partition_queue_for = None;
+        self.partition_queue.clear();
+        self.partition_queue_state.select(None);
+    }
+
+    pub fn partition_scroll_up(&mut self, lines: usize) {
+        if self.in_partition_queue_mode() {
+            let len = self.partition_queue.len();
+            if len == 0 {
+                return;
+            }
+            let cur = self.partition_queue_state.selected().unwrap_or(0);
+            let new = cur.saturating_sub(lines);
+            self.partition_queue_state.select(Some(new.min(len - 1)));
+            return;
+        }
+        let len = self.partitions.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.partition_table_state.selected().unwrap_or(0);
+        let new = cur.saturating_sub(lines);
+        self.partition_table_state.select(Some(new.min(len - 1)));
+    }
+
+    pub fn partition_scroll_down(&mut self, lines: usize) {
+        if self.in_partition_queue_mode() {
+            let len = self.partition_queue.len();
+            if len == 0 {
+                return;
+            }
+            let cur = self.partition_queue_state.selected().unwrap_or(0);
+            let new = (cur + lines).min(len - 1);
+            self.partition_queue_state.select(Some(new));
+            return;
+        }
+        let len = self.partitions.len();
+        if len == 0 {
+            return;
+        }
+        let cur = self.partition_table_state.selected().unwrap_or(0);
+        let new = (cur + lines).min(len - 1);
+        self.partition_table_state.select(Some(new));
     }
 
     /// Add a job to track.
@@ -220,18 +465,88 @@ impl App {
         }
     }
 
-    /// Get sorted job IDs.
-    ///
-    /// Sorts by base_id descending, then array_index ascending (None before Some).
-    /// This groups array tasks together under their parent.
+    /// Get sorted job IDs according to the current `joblist_sort`.
+    /// Columns: 0=Job ID, 1=Status, 2=Runtime, 3=Limit, 4=Node, 5=Name.
     pub fn get_sorted_job_ids(&self) -> Vec<JobId> {
         let mut ids: Vec<JobId> = self.jobs.keys().copied().collect();
-        ids.sort_unstable_by(|a, b| {
-            b.base_id
-                .cmp(&a.base_id)
-                .then(b.array_index.cmp(&a.array_index))
+        let s = self.joblist_sort;
+        ids.sort_by(|a, b| {
+            let ja = self.jobs.get(a);
+            let jb = self.jobs.get(b);
+            let ord = match s.column {
+                0 => a
+                    .base_id
+                    .cmp(&b.base_id)
+                    .then(a.array_index.cmp(&b.array_index)),
+                1 => {
+                    let sa = ja.map(|j| j.status.as_str()).unwrap_or("");
+                    let sb = jb.map(|j| j.status.as_str()).unwrap_or("");
+                    sa.cmp(sb)
+                }
+                2 => {
+                    let ea = ja
+                        .and_then(|j| parse_slurm_duration(&j.info.elapsed))
+                        .unwrap_or(-1);
+                    let eb = jb
+                        .and_then(|j| parse_slurm_duration(&j.info.elapsed))
+                        .unwrap_or(-1);
+                    ea.cmp(&eb)
+                }
+                3 => {
+                    let la = ja
+                        .and_then(|j| parse_slurm_duration(&j.info.time_limit))
+                        .unwrap_or(-1);
+                    let lb = jb
+                        .and_then(|j| parse_slurm_duration(&j.info.time_limit))
+                        .unwrap_or(-1);
+                    la.cmp(&lb)
+                }
+                4 => {
+                    let na = ja.map(|j| j.info.node_list.as_str()).unwrap_or("");
+                    let nb = jb.map(|j| j.info.node_list.as_str()).unwrap_or("");
+                    na.cmp(nb)
+                }
+                5 => {
+                    let na = ja.map(|j| j.info.job_name.as_str()).unwrap_or("");
+                    let nb = jb.map(|j| j.info.job_name.as_str()).unwrap_or("");
+                    na.cmp(nb)
+                }
+                _ => std::cmp::Ordering::Equal,
+            };
+            // Tie-break by Job ID for stability.
+            let ord = ord.then_with(|| {
+                a.base_id
+                    .cmp(&b.base_id)
+                    .then(a.array_index.cmp(&b.array_index))
+            });
+            if s.ascending {
+                ord
+            } else {
+                ord.reverse()
+            }
         });
         ids
+    }
+
+    pub fn cycle_joblist_sort(&mut self, column: usize) {
+        if self.joblist_sort.column == column {
+            self.joblist_sort.ascending = !self.joblist_sort.ascending;
+        } else {
+            // Numeric/time columns default desc; textual columns default asc.
+            let desc = matches!(column, 0 | 2 | 3);
+            self.joblist_sort = SortState {
+                column,
+                ascending: !desc,
+            };
+        }
+    }
+
+    pub fn hit_test_joblist_header(&self, col: u16, row: u16) -> Option<usize> {
+        use ratatui::layout::Position;
+        let pos = Position::new(col, row);
+        self.joblist_header_rects
+            .iter()
+            .position(|r| r.contains(pos))
     }
 
     /// Update job status.
@@ -273,7 +588,7 @@ impl App {
         let path = match self.focused_panel {
             FocusBlock::Stdout => &job.info.stdout_path,
             FocusBlock::Stderr => &job.info.stderr_path,
-            FocusBlock::JobList | FocusBlock::Details => return None,
+            FocusBlock::JobList | FocusBlock::Details | FocusBlock::Partitions => return None,
         };
         if path.as_os_str().is_empty() {
             None
@@ -326,10 +641,14 @@ impl App {
             self.details_scroll = self.details_scroll.saturating_sub(lines as u16);
             return;
         }
+        if self.focused_panel == FocusBlock::Partitions {
+            self.partition_scroll_up(lines);
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList | FocusBlock::Details => {}
+                    FocusBlock::JobList | FocusBlock::Details | FocusBlock::Partitions => {}
                     FocusBlock::Stdout => {
                         let visible_lines = self.stdout_panel_height;
                         let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
@@ -373,10 +692,14 @@ impl App {
             self.details_scroll = (self.details_scroll + lines as u16).min(self.details_scroll_max);
             return;
         }
+        if self.focused_panel == FocusBlock::Partitions {
+            self.partition_scroll_down(lines);
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList | FocusBlock::Details => {}
+                    FocusBlock::JobList | FocusBlock::Details | FocusBlock::Partitions => {}
                     FocusBlock::Stdout => {
                         let visible_lines = self.stdout_panel_height;
                         let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
@@ -418,10 +741,18 @@ impl App {
             self.details_scroll = 0;
             return;
         }
+        if self.focused_panel == FocusBlock::Partitions {
+            self.partition_table_state.select(if self.partitions.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList | FocusBlock::Details => {}
+                    FocusBlock::JobList | FocusBlock::Details | FocusBlock::Partitions => {}
                     FocusBlock::Stdout => {
                         job.stdout_scroll = 0;
                         job.stdout_scroll_mode = true;
@@ -441,10 +772,17 @@ impl App {
             self.details_scroll = self.details_scroll_max;
             return;
         }
+        if self.focused_panel == FocusBlock::Partitions {
+            if !self.partitions.is_empty() {
+                self.partition_table_state
+                    .select(Some(self.partitions.len() - 1));
+            }
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList | FocusBlock::Details => {}
+                    FocusBlock::JobList | FocusBlock::Details | FocusBlock::Partitions => {}
                     FocusBlock::Stdout => {
                         job.scroll_stdout_to_bottom(self.stdout_panel_height, self.stdout_panel_width);
                     }
@@ -477,23 +815,64 @@ impl App {
 
         let body_area = main_chunks[0];
 
-        // Fixed layout: JobList on top, info panel below. When zoomed, the
-        // panel containing the focused block fills the entire body.
-        let (joblist_rect, right_rect) = if self.zoomed {
-            match self.focused_panel {
-                FocusBlock::JobList => (body_area, Rect::default()),
-                _ => (Rect::default(), body_area),
-            }
+        // Decide partitions-panel height (auto-collapse when terminal is short).
+        // Need at least 20 rows of body before reserving anything for partitions.
+        // Otherwise the per-job panels become unusable.
+        const COLLAPSE_BELOW: u16 = 20;
+        let part_panel_h: u16 = if body_area.height < COLLAPSE_BELOW {
+            0
+        } else if self.in_partition_queue_mode() {
+            // Queue drill-down wants more vertical space.
+            let data_rows = self.partition_queue.len() as u16;
+            let desired = (data_rows + 3).clamp(8, 20);
+            desired.min(body_area.height / 2)
         } else {
-            let body_chunks = Layout::default()
+            // border (top+bot) + header + N data rows; cap at 10.
+            let data_rows = self.partitions.len() as u16;
+            let desired = (data_rows + 3).clamp(5, 10);
+            // Don't take more than ~⅓ of the body.
+            desired.min(body_area.height / 3)
+        };
+        self.partitions_collapsed = part_panel_h == 0;
+
+        // Layout: JobList(top) + Right(middle) + Partitions(bottom, optional).
+        // When zoomed, only the panel containing the focused block fills the body.
+        let (joblist_rect, right_rect, partitions_rect) = if self.zoomed {
+            match self.focused_panel {
+                FocusBlock::JobList => (body_area, Rect::default(), Rect::default()),
+                FocusBlock::Partitions if part_panel_h > 0 => {
+                    (Rect::default(), Rect::default(), body_area)
+                }
+                FocusBlock::Partitions => {
+                    // Collapsed but focused — show it anyway when zoomed so the
+                    // user has a way to actually see it on tiny terminals.
+                    (Rect::default(), Rect::default(), body_area)
+                }
+                _ => (Rect::default(), body_area, Rect::default()),
+            }
+        } else if part_panel_h == 0 {
+            // Collapsed: original two-panel layout (JobList on top, info below).
+            let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
                 .split(body_area);
-            (body_chunks[0], body_chunks[1])
+            (chunks[0], chunks[1], Rect::default())
+        } else {
+            // Three-panel layout: Partitions on top, then JobList, then Right.
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(part_panel_h),
+                    Constraint::Percentage(25),
+                    Constraint::Min(0),
+                ])
+                .split(body_area);
+            (chunks[1], chunks[2], chunks[0])
         };
 
         self.joblist_panel_rect = joblist_rect;
         self.right_panel_rect = right_rect;
+        self.partitions_panel_rect = partitions_rect;
 
         // If the right panel is collapsed (zoomed JobList), skip its layout.
         if right_rect.width == 0 || right_rect.height == 0 {
@@ -592,6 +971,8 @@ impl App {
             Some(FocusBlock::Stdout)
         } else if self.stderr_panel_rect.contains(pos) {
             Some(FocusBlock::Stderr)
+        } else if self.partitions_panel_rect.contains(pos) {
+            Some(FocusBlock::Partitions)
         } else if self.joblist_panel_rect.contains(pos) {
             Some(FocusBlock::JobList)
         } else {
@@ -623,12 +1004,50 @@ impl App {
                 return match self.focused_panel {
                     FocusBlock::Stdout => job.stdout_scroll_mode,
                     FocusBlock::Stderr => job.stderr_scroll_mode,
-                    FocusBlock::JobList | FocusBlock::Details => false,
+                    FocusBlock::JobList | FocusBlock::Details | FocusBlock::Partitions => false,
                 };
             }
         }
         false
     }
+}
+
+/// Parse a SLURM duration string (`D-HH:MM:SS`, `HH:MM:SS`, `MM:SS`).
+/// Returns `None` for empty / unparseable values (e.g. `UNLIMITED`).
+fn parse_slurm_duration(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() || matches!(s, "UNLIMITED" | "INVALID" | "N/A" | "Partition_Limit") {
+        return None;
+    }
+    let (days, rest) = if let Some((d, r)) = s.split_once('-') {
+        (d.parse::<i64>().ok()?, r)
+    } else {
+        (0, s)
+    };
+    let parts: Vec<i64> = rest.split(':').filter_map(|p| p.parse().ok()).collect();
+    let (h, m, sec) = match parts.len() {
+        3 => (parts[0], parts[1], parts[2]),
+        2 => (0, parts[0], parts[1]),
+        1 => (0, parts[0], 0),
+        _ => return None,
+    };
+    Some(days * 86400 + h * 3600 + m * 60 + sec)
+}
+
+/// Parse the leading integer of a string. Used to sort job IDs numerically
+/// while preserving the array-task suffix order (`8322_1` < `8322_10`).
+fn parse_int_prefix(s: &str) -> (u64, String) {
+    let mut n = 0u64;
+    let mut i = 0;
+    for ch in s.chars() {
+        if let Some(d) = ch.to_digit(10) {
+            n = n * 10 + d as u64;
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (n, s[i..].to_string())
 }
 
 /// Count total visual lines after hard-wrapping at `max_width`.

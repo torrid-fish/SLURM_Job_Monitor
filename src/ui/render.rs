@@ -1,6 +1,7 @@
 //! Rendering logic using Ratatui.
 
-use super::app::{wrap_lines, App, FocusBlock, RightTab};
+use super::app::{wrap_lines, App, FocusBlock, RightTab, SortState};
+use crate::partition_monitor::fmt_secs;
 use crate::utils::JobStatus;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -40,39 +41,83 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_body(frame, app, body_area);
 
-    render_brand(frame, main_chunks[1]);
+    render_footer(frame, app, main_chunks[1]);
 }
 
-fn render_brand(frame: &mut Frame, area: Rect) {
-    let text = format!(" lazyslurm v{} ", env!("CARGO_PKG_VERSION"));
-    let p = Paragraph::new(Span::styled(
-        text,
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ))
-    .alignment(Alignment::Right);
-    frame.render_widget(p, area);
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    // Brand on the right; context-sensitive operation hints on the left.
+    let brand = format!(" lazyslurm v{} ", env!("CARGO_PKG_VERSION"));
+    let brand_w = brand.chars().count() as u16;
+    let brand_w = brand_w.min(area.width);
+
+    let hint_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(brand_w),
+        height: 1,
+    };
+    let brand_area = Rect {
+        x: area.x.saturating_add(area.width.saturating_sub(brand_w)),
+        y: area.y,
+        width: brand_w,
+        height: 1,
+    };
+
+    let hint = footer_hint(app);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            hint,
+            Style::default().fg(Color::White),
+        ))
+        .alignment(Alignment::Left),
+        hint_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            brand,
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Right),
+        brand_area,
+    );
+}
+
+fn footer_hint(app: &App) -> String {
+    let common = "Tab: focus  +/-: zoom  q: quit";
+    match app.focused_panel {
+        FocusBlock::JobList => {
+            format!(" click hdr: sort  ↑/↓: select  d: delete  Enter: open  {common}")
+        }
+        FocusBlock::Details => {
+            format!(" ↑/↓ PgUp/PgDn: scroll  {common}")
+        }
+        FocusBlock::Stdout | FocusBlock::Stderr => {
+            format!(" ↑/↓ PgUp/PgDn: scroll  Enter: open in editor  {common}")
+        }
+        FocusBlock::Partitions => {
+            if app.in_partition_queue_mode() {
+                format!(" click hdr: sort  ↑/↓: select  Esc/Bksp: back  {common}")
+            } else {
+                format!(" click hdr: sort  ↑/↓: select  Enter: queue  {common}")
+            }
+        }
+    }
 }
 
 fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Fixed layout: JobList on top, info panel below. When zoomed, only the
-    // panel containing the focused block is shown — the App computed its rect
-    // and zeroed the other side.
-    if app.zoomed {
-        if matches!(app.focused_panel, FocusBlock::JobList) {
-            render_status_panel(frame, app, area);
-        } else {
-            render_right_panel(frame, app, area, Direction::Vertical);
-        }
-        return;
+    // Layout pre-computed by App::update_panel_heights — render whichever
+    // rects are non-empty. When zoomed, only one of them is non-empty.
+    let _ = area;
+
+    if app.joblist_panel_rect.height > 0 {
+        render_status_panel(frame, app, app.joblist_panel_rect);
     }
-
-    let body_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(area);
-
-    render_status_panel(frame, app, body_chunks[0]);
-    render_right_panel(frame, app, body_chunks[1], Direction::Vertical);
+    if app.right_panel_rect.height > 0 {
+        render_right_panel(frame, app, app.right_panel_rect, Direction::Vertical);
+    }
+    if app.partitions_panel_rect.height > 0 {
+        render_partitions_panel(frame, app, app.partitions_panel_rect);
+    }
 }
 
 fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, _output_dir: Direction) {
@@ -367,11 +412,12 @@ fn render_inner_log(frame: &mut Frame, app: &App, area: Rect, kind: LogKind) {
 
 fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focused_panel == FocusBlock::JobList;
-    let panel_title = "Jobs (Tab: switch, ↑/↓: select, d: delete)";
+    let panel_title = "Jobs";
 
     if app.jobs.is_empty() {
         let empty = Paragraph::new("No jobs").block(block_for(panel_title, focused));
         frame.render_widget(empty, area);
+        app.joblist_header_rects.clear();
         return;
     }
 
@@ -393,11 +439,20 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         .and_then(|cid| sorted_ids.iter().position(|&id| id == cid));
     app.table_state.select(selected_index);
 
-    // Create table header
-    let header_cells = ["Job ID", "Status", "Runtime", "Limit", "Node", "Name"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
-    let header = Row::new(header_cells).height(1);
+    // Create table header with sort indicator on the active column.
+    let labels = ["Job ID", "Status", "Runtime", "Limit", "Node", "Name"];
+    let sort = app.joblist_sort;
+    let header = Row::new(labels.iter().enumerate().map(|(i, h)| {
+        let label = header_label(h, sort, i);
+        let style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+        let style = if sort.column == i {
+            style.fg(Color::Yellow)
+        } else {
+            style
+        };
+        Cell::from(label).style(style)
+    }))
+    .height(1);
 
     // Create table rows
     let rows: Vec<Row> = sorted_ids
@@ -451,15 +506,16 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
+    let widths = [10u16, 10, 10, 10, 15, 10];
     let table = Table::new(
         rows,
         [
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(15),
-            Constraint::Min(10),
+            Constraint::Length(widths[0]),
+            Constraint::Length(widths[1]),
+            Constraint::Length(widths[2]),
+            Constraint::Length(widths[3]),
+            Constraint::Length(widths[4]),
+            Constraint::Min(widths[5]),
         ],
     )
     .header(header)
@@ -468,6 +524,7 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     .highlight_symbol("▶ ")
     .block(block_for(panel_title, focused));
 
+    app.joblist_header_rects = compute_header_rects(table_area, &widths, 3, 2);
     frame.render_stateful_widget(table, table_area, &mut app.table_state);
 }
 
@@ -480,6 +537,221 @@ fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
     }
     let head: String = s.chars().take(max_len - 3).collect();
     format!("{}...", head)
+}
+
+/// Compute the screen rect for each header cell in a bordered table, given
+/// fixed column widths (with the *last* column flexing to fill remaining
+/// space). Mirrors ratatui's table layout: 1-cell border on each side, plus a
+/// 2-cell highlight-symbol gutter when a row is selected.
+fn compute_header_rects(
+    panel: Rect,
+    widths: &[u16],
+    spacing: u16,
+    symbol_w: u16,
+) -> Vec<Rect> {
+    if widths.is_empty() || panel.width < 4 || panel.height < 2 {
+        return Vec::new();
+    }
+    let inner_x = panel.x.saturating_add(1);
+    let inner_y = panel.y.saturating_add(1);
+    let inner_w = panel.width.saturating_sub(2);
+
+    let mut rects = Vec::with_capacity(widths.len());
+    let mut x = inner_x.saturating_add(symbol_w);
+    let mut remaining = inner_w.saturating_sub(symbol_w);
+
+    for (i, &w) in widths.iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let is_last = i == widths.len() - 1;
+        let col_w = if is_last { remaining } else { w.min(remaining) };
+        rects.push(Rect {
+            x,
+            y: inner_y,
+            width: col_w,
+            height: 1,
+        });
+        let advance = col_w.saturating_add(spacing);
+        x = x.saturating_add(advance);
+        remaining = remaining.saturating_sub(advance.min(remaining));
+    }
+    rects
+}
+
+fn header_label(label: &str, sort: SortState, idx: usize) -> String {
+    if sort.column == idx {
+        let arrow = if sort.ascending { '▲' } else { '▼' };
+        format!("{} {}", label, arrow)
+    } else {
+        label.to_string()
+    }
+}
+
+fn render_partitions_panel(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focused_panel == FocusBlock::Partitions;
+
+    // Drill-down mode: show pending jobs for the selected partition instead.
+    if let Some(partition) = app.partition_queue_for.clone() {
+        render_partition_queue_panel(frame, app, area, &partition, focused);
+        return;
+    }
+
+    let title = format!(
+        "Partitions  ({} run / {} pend, total {})",
+        app.partition_total_running,
+        app.partition_total_pending,
+        app.partition_total_running + app.partition_total_pending,
+    );
+    let block = block_for(&title, focused);
+
+    if app.partitions.is_empty() {
+        let empty = Paragraph::new("Loading partition data…").block(block);
+        frame.render_widget(empty, area);
+        app.partition_header_rects.clear();
+        return;
+    }
+
+    let labels = ["Partition", "Nodes", "Pend", "Min-Wait", "States"];
+    let sort = app.partition_sort;
+    let header = Row::new(labels.iter().enumerate().map(|(i, h)| {
+        let label = header_label(h, sort, i);
+        let style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+        let style = if sort.column == i {
+            style.fg(Color::Yellow)
+        } else {
+            style
+        };
+        Cell::from(label).style(style)
+    }))
+    .height(1);
+
+    let rows: Vec<Row> = app
+        .partitions
+        .iter()
+        .map(|p| {
+            let nodes = format!("{}/{}", p.free_nodes, p.total_nodes);
+            let wait = fmt_secs(p.min_wait_secs, p.is_down);
+            let wait_color = if p.is_down {
+                Color::Red
+            } else if p.min_wait_secs == Some(0) {
+                Color::Green
+            } else if p.min_wait_secs.is_none() {
+                Color::DarkGray
+            } else {
+                Color::Yellow
+            };
+            Row::new(vec![
+                Cell::from(p.name.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(nodes),
+                Cell::from(p.pending_jobs.to_string()),
+                Cell::from(wait).style(Style::default().fg(wait_color)),
+                Cell::from(p.states.clone()).style(Style::default().fg(Color::White)),
+            ])
+            .height(1)
+        })
+        .collect();
+
+    let widths = [14u16, 10, 6, 14, 10];
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(widths[0]),
+            Constraint::Length(widths[1]),
+            Constraint::Length(widths[2]),
+            Constraint::Length(widths[3]),
+            Constraint::Min(widths[4]),
+        ],
+    )
+    .header(header)
+    .column_spacing(2)
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("▶ ")
+    .block(block);
+
+    app.partition_header_rects = compute_header_rects(area, &widths, 2, 2);
+    frame.render_stateful_widget(table, area, &mut app.partition_table_state);
+}
+
+fn render_partition_queue_panel(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    partition: &str,
+    focused: bool,
+) {
+    let title = format!("Queue: {}  ({} pending)", partition, app.partition_queue.len());
+    let block = block_for(&title, focused);
+
+    if app.partition_queue.is_empty() {
+        let empty = Paragraph::new("No pending jobs on this partition.").block(block);
+        frame.render_widget(empty, area);
+        app.partition_queue_header_rects.clear();
+        return;
+    }
+
+    let labels = ["JobID", "User", "Name", "Prio", "Limit", "Nodes", "CPUs", "Reason"];
+    let sort = app.partition_queue_sort;
+    let header = Row::new(labels.iter().enumerate().map(|(i, h)| {
+        let label = header_label(h, sort, i);
+        let style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+        let style = if sort.column == i {
+            style.fg(Color::Yellow)
+        } else {
+            style
+        };
+        Cell::from(label).style(style)
+    }))
+    .height(1);
+
+    let rows: Vec<Row> = app
+        .partition_queue
+        .iter()
+        .map(|j| {
+            Row::new(vec![
+                Cell::from(j.job_id.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(j.user.clone()),
+                Cell::from(j.name.clone()),
+                Cell::from(j.priority.clone()),
+                Cell::from(j.time_limit.clone()),
+                Cell::from(j.nodes.clone()),
+                Cell::from(j.cpus.clone()),
+                Cell::from(j.reason.clone()).style(Style::default().fg(Color::Yellow)),
+            ])
+            .height(1)
+        })
+        .collect();
+
+    let widths = [12u16, 10, 20, 10, 10, 6, 5, 10];
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(widths[0]),
+            Constraint::Length(widths[1]),
+            Constraint::Length(widths[2]),
+            Constraint::Length(widths[3]),
+            Constraint::Length(widths[4]),
+            Constraint::Length(widths[5]),
+            Constraint::Length(widths[6]),
+            Constraint::Min(widths[7]),
+        ],
+    )
+    .header(header)
+    .column_spacing(2)
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("▶ ")
+    .block(block);
+
+    app.partition_queue_header_rects = compute_header_rects(area, &widths, 2, 2);
+    frame.render_stateful_widget(table, area, &mut app.partition_queue_state);
 }
 
 fn get_visible_lines(lines: &[String], scroll_pos: usize, max_height: usize) -> Vec<String> {
