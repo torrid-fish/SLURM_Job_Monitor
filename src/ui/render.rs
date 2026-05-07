@@ -73,7 +73,7 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     render_status_panel(frame, app, body_chunks[0]);
-    render_right_panel(frame, app, body_chunks[1], Direction::Horizontal);
+    render_right_panel(frame, app, body_chunks[1], Direction::Vertical);
 }
 
 fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, output_dir: Direction) {

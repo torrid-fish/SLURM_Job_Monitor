@@ -495,7 +495,7 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
                     .split(body_area);
-                (body_chunks[0], body_chunks[1], Direction::Horizontal)
+                (body_chunks[0], body_chunks[1], Direction::Vertical)
             }
         };
 
