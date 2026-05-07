@@ -26,6 +26,8 @@ pub struct JobInfo {
     pub start_time: String,
     pub end_time: String,
     pub elapsed: String,
+    pub time_limit: String,
+    pub node_list: String,
     pub work_dir: PathBuf,
     pub stdout_path: PathBuf,
     pub stderr_path: PathBuf,
@@ -107,7 +109,7 @@ impl JobManager {
                 "sacct",
                 "-j",
                 &id_str,
-                "--format=JobID,JobName,State,Start,End,Elapsed,WorkDir,StdOut,StdErr",
+                "--format=JobID,JobName,State,Start,End,Elapsed,Timelimit,NodeList,WorkDir,StdOut,StdErr",
                 "--parsable2",
             ],
             false,
@@ -122,6 +124,8 @@ impl JobManager {
                 info.start_time = parsed.get("Start").cloned().unwrap_or_default();
                 info.end_time = parsed.get("End").cloned().unwrap_or_default();
                 info.elapsed = parsed.get("Elapsed").cloned().unwrap_or_default();
+                info.time_limit = parsed.get("Timelimit").cloned().unwrap_or_default();
+                info.node_list = parsed.get("NodeList").cloned().unwrap_or_default();
 
                 let work_dir = parsed.get("WorkDir").cloned().unwrap_or_default();
                 info.work_dir = PathBuf::from(&work_dir);

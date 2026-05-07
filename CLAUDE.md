@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Detailed agent notes already live in `AGENTS.md` — read it first. This file summarizes the highlights and points at things that are easy to get wrong.
+This file captures the things that are easy to get wrong in this repo. The README is user-facing; read it for feature-level context.
 
 ## Build, Run, Test
 
@@ -40,4 +40,4 @@ Editor integration (Enter key) suspends the TUI via `suspend_and_open_editor` in
 
 ## Key bindings worth remembering
 
-`n` = previous job, `p` = next job (vim-reversed from numeric intuition). `Tab` toggles stdout/stderr focus. `d` removes the current job from view. `Enter` opens the focused log in the editor. Arrow keys enter per-panel scroll mode (disables auto-scroll); scrolling to the bottom or pressing `q` exits scroll mode. `Ctrl+C` always quits.
+`n` = previous job, `p` = next job (vim-reversed from numeric intuition). `Tab` toggles stdout/stderr focus. `d` removes the current job from view. `l` cycles layout mode (Horizontal/Vertical/Stacked/FullLog). `Enter` opens the focused log in the editor. Arrow keys enter per-panel scroll mode (disables auto-scroll); scrolling to the bottom or pressing `q` exits scroll mode. Mouse click switches the focused panel; mouse scroll scrolls it. `Ctrl+C` always quits.
