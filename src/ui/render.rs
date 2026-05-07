@@ -377,9 +377,13 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let table_area = area;
 
-    // Dynamic name truncation: use available width instead of hardcoded 20
-    // area.width - 2 (borders) - 12*3 (fixed cols) - 3 (column gaps) = area.width - 41
-    let name_max_len = (table_area.width as usize).saturating_sub(41).max(10);
+    // Six fixed-width columns (Job ID, Status, Runtime, Limit, Node) take up
+    // 10+10+10+10+15 = 55 cols, plus 5 gaps + 2 borders = 62. Whatever's left
+    // is given to the Name column, with a 10-char minimum truncation budget.
+    const FIXED_COLS_WIDTH: usize = 10 + 10 + 10 + 10 + 15 + 5 + 2;
+    let name_max_len = (table_area.width as usize)
+        .saturating_sub(FIXED_COLS_WIDTH)
+        .max(10);
 
     let sorted_ids = app.get_sorted_job_ids();
 
@@ -390,7 +394,7 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     app.table_state.select(selected_index);
 
     // Create table header
-    let header_cells = ["Job ID", "Status", "Runtime", "Name"]
+    let header_cells = ["Job ID", "Status", "Runtime", "Limit", "Node", "Name"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
     let header = Row::new(header_cells).height(1);
@@ -415,12 +419,22 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                 job.info.elapsed.clone()
             };
 
+            let limit = if job.info.time_limit.is_empty() {
+                "—".to_string()
+            } else {
+                job.info.time_limit.clone()
+            };
+
+            let node = if job.info.node_list.is_empty() {
+                "—".to_string()
+            } else {
+                truncate_with_ellipsis(&job.info.node_list, 15)
+            };
+
             let name = if job.info.job_name.is_empty() {
                 format!("Job {}", job_id)
-            } else if job.info.job_name.len() > name_max_len {
-                format!("{}...", &job.info.job_name[..name_max_len.saturating_sub(3)])
             } else {
-                job.info.job_name.clone()
+                truncate_with_ellipsis(&job.info.job_name, name_max_len)
             };
 
             Some(
@@ -428,6 +442,8 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
                     Cell::from(job_id.to_string()).style(Style::default().fg(Color::Cyan)),
                     Cell::from(job.status.as_str()).style(Style::default().fg(status_color)),
                     Cell::from(runtime),
+                    Cell::from(limit),
+                    Cell::from(node),
                     Cell::from(name),
                 ])
                 .height(1),
@@ -438,9 +454,11 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(15),
             Constraint::Min(10),
         ],
     )
@@ -450,6 +468,17 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     .block(block_for(panel_title, focused));
 
     frame.render_stateful_widget(table, table_area, &mut app.table_state);
+}
+
+fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        return s.to_string();
+    }
+    if max_len <= 3 {
+        return s.chars().take(max_len).collect();
+    }
+    let head: String = s.chars().take(max_len - 3).collect();
+    format!("{}...", head)
 }
 
 fn get_visible_lines(lines: &[String], scroll_pos: usize, max_height: usize) -> Vec<String> {
