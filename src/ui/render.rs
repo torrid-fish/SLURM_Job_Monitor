@@ -1,25 +1,42 @@
 //! Rendering logic using Ratatui.
 
-use super::app::{wrap_lines, App, FocusedPanel, LayoutMode};
+use super::app::{wrap_lines, App, FocusBlock, LayoutMode};
 use crate::utils::JobStatus;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
+
+/// Color used for the focused block's border and title.
+const FOCUS_COLOR: Color = Color::Green;
+/// Color used for unfocused block borders and titles.
+const UNFOCUS_COLOR: Color = Color::White;
+
+fn block_for(title: &str, focused: bool) -> Block<'_> {
+    let border_color = if focused { FOCUS_COLOR } else { UNFOCUS_COLOR };
+    let title_style = if focused {
+        Style::default().fg(FOCUS_COLOR).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(UNFOCUS_COLOR)
+    };
+    Block::default()
+        .title(Span::styled(title.to_string(), title_style))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+}
 
 /// Render the entire UI.
 pub fn render(frame: &mut Frame, app: &mut App) {
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
-    render_header(frame, app, main_chunks[0]);
-
-    let body_area = main_chunks[1];
+    let body_area = main_chunks[0];
 
     match app.layout {
         LayoutMode::Horizontal => render_horizontal(frame, app, body_area),
@@ -27,6 +44,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         LayoutMode::Stacked => render_stacked(frame, app, body_area),
         LayoutMode::FullLog => render_full_log(frame, app, body_area),
     }
+
+    render_brand(frame, main_chunks[1]);
+}
+
+fn render_brand(frame: &mut Frame, area: Rect) {
+    let text = format!("lazyslurm v{}", env!("CARGO_PKG_VERSION"));
+    let p = Paragraph::new(Span::styled(
+        text,
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+    ))
+    .alignment(Alignment::Right);
+    frame.render_widget(p, area);
 }
 
 fn render_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -70,52 +99,32 @@ fn render_full_log(frame: &mut Frame, app: &mut App, area: Rect) {
     render_stderr_panel(frame, app, body_chunks[1]);
 }
 
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let job_count = app.jobs.len();
-    let mut title = format!(
-        "lazyslurm - {} job{} [{}]",
-        job_count,
-        if job_count == 1 { "" } else { "s" },
-        app.layout.name(),
-    );
-
-    if let Some(job_id) = app.current_job_id {
-        if let Some(job) = app.jobs.get(&job_id) {
-            let name = if job.info.job_name.is_empty() {
-                format!("Job {}", job_id)
-            } else {
-                job.info.job_name.clone()
-            };
-            title.push_str(&format!(" | Current: {} (ID: {})", name, job_id));
-        }
-    }
-
-    let help_text = "Ctrl+C: exit | Scroll: arrows | Tab: switch panels | l: layout | Enter: editor";
-
-    let header_text = vec![
-        Line::from(Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled(help_text, Style::default().fg(Color::DarkGray))),
-    ];
-
-    let header = Paragraph::new(header_text)
-        .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Blue)));
-
-    frame.render_widget(header, area);
-}
-
 fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
-    let panel_title = "Job Status (n: prev, p: next, d: delete)";
+    let focused = app.focused_panel == FocusBlock::JobList;
+    let panel_title = "Jobs (Tab: switch, ↑/↓: select, d: delete)";
 
     if app.jobs.is_empty() {
-        let empty = Paragraph::new("No jobs")
-            .block(Block::default().title(panel_title).borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
+        let empty = Paragraph::new("No jobs").block(block_for(panel_title, focused));
         frame.render_widget(empty, area);
         return;
     }
 
+    // Reserve bottom rows for selected-job details (only if there's enough vertical space).
+    // Details block: borders (2) + 3 lines of content = 5 rows.
+    let details_height: u16 = 5;
+    let (table_area, details_area) = if area.height > details_height + 4 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(details_height)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
+
     // Dynamic name truncation: use available width instead of hardcoded 20
     // area.width - 2 (borders) - 12*3 (fixed cols) - 3 (column gaps) = area.width - 41
-    let name_max_len = (area.width as usize).saturating_sub(41).max(10);
+    let name_max_len = (table_area.width as usize).saturating_sub(41).max(10);
 
     let sorted_ids = app.get_sorted_job_ids();
 
@@ -183,20 +192,72 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     .header(header)
     .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ")
-    .block(
-        Block::default()
-            .title(panel_title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow)),
-    );
+    .block(block_for(panel_title, focused));
 
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    frame.render_stateful_widget(table, table_area, &mut app.table_state);
+
+    if let Some(details_area) = details_area {
+        render_job_details(frame, app, details_area);
+    }
+}
+
+fn render_job_details(frame: &mut Frame, app: &App, area: Rect) {
+    let label_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+
+    let lines: Vec<Line> = match app.current_job_id.and_then(|id| app.jobs.get(&id)) {
+        Some(job) => {
+            let placeholder = "—".to_string();
+            let node = if job.info.node_list.is_empty() {
+                &placeholder
+            } else {
+                &job.info.node_list
+            };
+            let limit = if job.info.time_limit.is_empty() {
+                &placeholder
+            } else {
+                &job.info.time_limit
+            };
+            let elapsed = if job.info.elapsed.is_empty() {
+                &placeholder
+            } else {
+                &job.info.elapsed
+            };
+            let work_dir = job.info.work_dir.display().to_string();
+            let work_dir = if work_dir.is_empty() { &placeholder } else { &work_dir };
+
+            vec![
+                Line::from(vec![
+                    Span::styled("Node:  ", label_style),
+                    Span::raw(node.clone()),
+                    Span::raw("    "),
+                    Span::styled("Limit: ", label_style),
+                    Span::raw(limit.clone()),
+                    Span::raw("    "),
+                    Span::styled("Elapsed: ", label_style),
+                    Span::raw(elapsed.clone()),
+                ]),
+                Line::from(vec![
+                    Span::styled("WorkDir: ", label_style),
+                    Span::raw(work_dir.clone()),
+                ]),
+                Line::from(vec![
+                    Span::styled("StdOut: ", label_style),
+                    Span::raw(job.info.stdout_path.display().to_string()),
+                ]),
+            ]
+        }
+        None => vec![Line::from(Span::raw("No job selected"))],
+    };
+
+    let focused = app.focused_panel == FocusBlock::JobList;
+    let paragraph = Paragraph::new(lines).block(block_for("Details", focused));
+    frame.render_widget(paragraph, area);
 }
 
 fn render_output_panel_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.current_job_id.is_none() {
         let empty = Paragraph::new("Select a job to view output")
-            .block(Block::default().title("Output").borders(Borders::ALL).border_style(Style::default().fg(Color::Green)));
+            .block(block_for("Output", false));
         frame.render_widget(empty, area);
         return;
     }
@@ -213,7 +274,7 @@ fn render_output_panel_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_output_panel_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.current_job_id.is_none() {
         let empty = Paragraph::new("Select a job to view output")
-            .block(Block::default().title("Output").borders(Borders::ALL).border_style(Style::default().fg(Color::Green)));
+            .block(block_for("Output", false));
         frame.render_widget(empty, area);
         return;
     }
@@ -238,35 +299,15 @@ fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    let is_focused = app.focused_panel == FocusedPanel::Stdout;
-    let border_color = if is_focused {
-        Color::LightGreen
-    } else {
-        Color::DarkGray
-    };
-
-    let focus_indicator = if is_focused {
-        " [FOCUSED]"
-    } else {
-        " [Press Tab to focus]"
-    };
+    let is_focused = app.focused_panel == FocusBlock::Stdout;
 
     let scroll_indicator = if job.stdout_scroll_mode {
-        " [SCROLL MODE - Press 'q' to exit]"
+        " [SCROLL]"
     } else {
         ""
     };
 
-    let title = format!(
-        "STDOUT (Job {}){}{}",
-        job_id, focus_indicator, scroll_indicator
-    );
-
-    let title_style = if is_focused {
-        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let title = format!("STDOUT (Job {}){}", job_id, scroll_indicator);
 
     // Calculate visible lines
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -280,13 +321,7 @@ fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
         visible_lines.join("\n")
     };
 
-    let paragraph = Paragraph::new(content)
-        .block(
-            Block::default()
-                .title(Span::styled(title, title_style))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color)),
-        );
+    let paragraph = Paragraph::new(content).block(block_for(&title, is_focused));
 
     frame.render_widget(paragraph, area);
 }
@@ -302,35 +337,15 @@ fn render_stderr_panel(frame: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    let is_focused = app.focused_panel == FocusedPanel::Stderr;
-    let border_color = if is_focused {
-        Color::LightRed
-    } else {
-        Color::DarkGray
-    };
-
-    let focus_indicator = if is_focused {
-        " [FOCUSED]"
-    } else {
-        " [Press Tab to focus]"
-    };
+    let is_focused = app.focused_panel == FocusBlock::Stderr;
 
     let scroll_indicator = if job.stderr_scroll_mode {
-        " [SCROLL MODE - Press 'q' to exit]"
+        " [SCROLL]"
     } else {
         ""
     };
 
-    let title = format!(
-        "STDERR (Job {}){}{}",
-        job_id, focus_indicator, scroll_indicator
-    );
-
-    let title_style = if is_focused {
-        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let title = format!("STDERR (Job {}){}", job_id, scroll_indicator);
 
     // Calculate visible lines
     let inner_height = area.height.saturating_sub(2) as usize;
@@ -344,13 +359,7 @@ fn render_stderr_panel(frame: &mut Frame, app: &App, area: Rect) {
         visible_lines.join("\n")
     };
 
-    let paragraph = Paragraph::new(content)
-        .block(
-            Block::default()
-                .title(Span::styled(title, title_style))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color)),
-        );
+    let paragraph = Paragraph::new(content).block(block_for(&title, is_focused));
 
     frame.render_widget(paragraph, area);
 }

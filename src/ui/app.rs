@@ -7,12 +7,16 @@ use ratatui::widgets::TableState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-/// Which panel is currently focused
+/// Which block is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusedPanel {
+pub enum FocusBlock {
+    JobList,
     Stdout,
     Stderr,
 }
+
+/// Backwards-compatible alias for the legacy name.
+pub type FocusedPanel = FocusBlock;
 
 /// Layout mode for the TUI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,12 +51,18 @@ impl LayoutMode {
     }
 }
 
-impl FocusedPanel {
+impl FocusBlock {
+    /// Cycle Tab key forward: JobList → Stdout → Stderr → JobList.
+    pub fn next(self) -> Self {
+        match self {
+            FocusBlock::JobList => FocusBlock::Stdout,
+            FocusBlock::Stdout => FocusBlock::Stderr,
+            FocusBlock::Stderr => FocusBlock::JobList,
+        }
+    }
+
     pub fn toggle(&mut self) {
-        *self = match self {
-            FocusedPanel::Stdout => FocusedPanel::Stderr,
-            FocusedPanel::Stderr => FocusedPanel::Stdout,
-        };
+        *self = self.next();
     }
 }
 
@@ -164,6 +174,7 @@ pub struct App {
     pub editor: String,
     pub stdout_panel_rect: Rect,
     pub stderr_panel_rect: Rect,
+    pub joblist_panel_rect: Rect,
 }
 
 impl App {
@@ -171,7 +182,7 @@ impl App {
         Self {
             jobs: HashMap::new(),
             current_job_id: None,
-            focused_panel: FocusedPanel::Stdout,
+            focused_panel: FocusBlock::JobList,
             layout: LayoutMode::Horizontal,
             should_quit: false,
             max_visible_lines: 20,
@@ -185,6 +196,7 @@ impl App {
             editor,
             stdout_panel_rect: Rect::default(),
             stderr_panel_rect: Rect::default(),
+            joblist_panel_rect: Rect::default(),
         }
     }
 
@@ -263,8 +275,9 @@ impl App {
         let job_id = self.current_job_id?;
         let job = self.jobs.get(&job_id)?;
         let path = match self.focused_panel {
-            FocusedPanel::Stdout => &job.info.stdout_path,
-            FocusedPanel::Stderr => &job.info.stderr_path,
+            FocusBlock::Stdout => &job.info.stdout_path,
+            FocusBlock::Stderr => &job.info.stderr_path,
+            FocusBlock::JobList => return None,
         };
         if path.as_os_str().is_empty() {
             None
@@ -307,10 +320,17 @@ impl App {
 
     /// Scroll the focused panel up.
     pub fn scroll_up(&mut self, lines: usize) {
+        if self.focused_panel == FocusBlock::JobList {
+            for _ in 0..lines {
+                self.prev_job();
+            }
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusedPanel::Stdout => {
+                    FocusBlock::JobList => {}
+                    FocusBlock::Stdout => {
                         let visible_lines = self.stdout_panel_height;
                         let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
                         let max_scroll = total.saturating_sub(visible_lines);
@@ -323,7 +343,7 @@ impl App {
                             job.stdout_scroll_mode = true;
                         }
                     }
-                    FocusedPanel::Stderr => {
+                    FocusBlock::Stderr => {
                         let visible_lines = self.stderr_panel_height;
                         let total = wrap_lines_count(&job.stderr_lines, self.stderr_panel_width);
                         let max_scroll = total.saturating_sub(visible_lines);
@@ -343,10 +363,17 @@ impl App {
 
     /// Scroll the focused panel down.
     pub fn scroll_down(&mut self, lines: usize) {
+        if self.focused_panel == FocusBlock::JobList {
+            for _ in 0..lines {
+                self.next_job();
+            }
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusedPanel::Stdout => {
+                    FocusBlock::JobList => {}
+                    FocusBlock::Stdout => {
                         let visible_lines = self.stdout_panel_height;
                         let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
                         let max_scroll = total.saturating_sub(visible_lines);
@@ -361,7 +388,7 @@ impl App {
                             job.stdout_scroll_mode = false;
                         }
                     }
-                    FocusedPanel::Stderr => {
+                    FocusBlock::Stderr => {
                         let visible_lines = self.stderr_panel_height;
                         let total = wrap_lines_count(&job.stderr_lines, self.stderr_panel_width);
                         let max_scroll = total.saturating_sub(visible_lines);
@@ -386,11 +413,12 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusedPanel::Stdout => {
+                    FocusBlock::JobList => {}
+                    FocusBlock::Stdout => {
                         job.stdout_scroll = 0;
                         job.stdout_scroll_mode = true;
                     }
-                    FocusedPanel::Stderr => {
+                    FocusBlock::Stderr => {
                         job.stderr_scroll = 0;
                         job.stderr_scroll_mode = true;
                     }
@@ -404,10 +432,11 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusedPanel::Stdout => {
+                    FocusBlock::JobList => {}
+                    FocusBlock::Stdout => {
                         job.scroll_stdout_to_bottom(self.stdout_panel_height, self.stdout_panel_width);
                     }
-                    FocusedPanel::Stderr => {
+                    FocusBlock::Stderr => {
                         job.scroll_stderr_to_bottom(self.stderr_panel_height, self.stderr_panel_width);
                     }
                 }
@@ -428,12 +457,13 @@ impl App {
     }
 
     pub fn update_panel_heights(&mut self, frame_area: Rect) {
+        // Reserve 1 row at the bottom for the brand mark.
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
             .split(frame_area);
 
-        let body_area = main_chunks[1];
+        let body_area = main_chunks[0];
 
         match self.layout {
             LayoutMode::Horizontal => {
@@ -445,6 +475,7 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_chunks[1]);
+                self.joblist_panel_rect = body_chunks[0];
                 self.stdout_panel_rect = output_chunks[0];
                 self.stderr_panel_rect = output_chunks[1];
                 self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
@@ -461,6 +492,7 @@ impl App {
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_chunks[1]);
+                self.joblist_panel_rect = body_chunks[0];
                 self.stdout_panel_rect = output_chunks[0];
                 self.stderr_panel_rect = output_chunks[1];
                 self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
@@ -473,6 +505,7 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(40)])
                     .split(body_area);
+                self.joblist_panel_rect = body_chunks[0];
                 self.stdout_panel_rect = body_chunks[1];
                 self.stderr_panel_rect = body_chunks[2];
                 self.stdout_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
@@ -485,6 +518,7 @@ impl App {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(body_area);
+                self.joblist_panel_rect = Rect::default();
                 self.stdout_panel_rect = body_chunks[0];
                 self.stderr_panel_rect = body_chunks[1];
                 self.stdout_panel_height = body_chunks[0].height.saturating_sub(2).max(1) as usize;
@@ -497,16 +531,35 @@ impl App {
         self.max_visible_lines = self.stdout_panel_height;
     }
 
-    pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<FocusedPanel> {
+    pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<FocusBlock> {
         use ratatui::layout::Position;
         let pos = Position::new(col, row);
         if self.stdout_panel_rect.contains(pos) {
-            Some(FocusedPanel::Stdout)
+            Some(FocusBlock::Stdout)
         } else if self.stderr_panel_rect.contains(pos) {
-            Some(FocusedPanel::Stderr)
+            Some(FocusBlock::Stderr)
+        } else if self.joblist_panel_rect.contains(pos) {
+            Some(FocusBlock::JobList)
         } else {
             None
         }
+    }
+
+    /// Given a click inside the joblist rect, compute which row's job was clicked.
+    pub fn joblist_row_to_job(&self, col: u16, row: u16) -> Option<JobId> {
+        use ratatui::layout::Position;
+        let pos = Position::new(col, row);
+        if !self.joblist_panel_rect.contains(pos) {
+            return None;
+        }
+        let inner_top = self.joblist_panel_rect.y + 1; // skip border
+        let header_row = inner_top; // header occupies one row
+        if row <= header_row {
+            return None;
+        }
+        let row_index = (row - header_row - 1) as usize;
+        let ids = self.get_sorted_job_ids();
+        ids.get(row_index).copied()
     }
 
     /// Check if current job is in scroll mode.
@@ -514,8 +567,9 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get(&job_id) {
                 return match self.focused_panel {
-                    FocusedPanel::Stdout => job.stdout_scroll_mode,
-                    FocusedPanel::Stderr => job.stderr_scroll_mode,
+                    FocusBlock::Stdout => job.stdout_scroll_mode,
+                    FocusBlock::Stderr => job.stderr_scroll_mode,
+                    FocusBlock::JobList => false,
                 };
             }
         }

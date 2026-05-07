@@ -412,12 +412,23 @@ fn run_event_loop(
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                             if let Some(panel) = app.hit_test_panel(mouse.column, mouse.row) {
                                 app.focused_panel = panel;
+                                if panel == crate::ui::app::FocusBlock::JobList {
+                                    if let Some(jid) = app.joblist_row_to_job(mouse.column, mouse.row) {
+                                        app.current_job_id = Some(jid);
+                                    }
+                                }
                             }
                         }
                         MouseEventKind::ScrollUp => {
+                            if let Some(panel) = app.hit_test_panel(mouse.column, mouse.row) {
+                                app.focused_panel = panel;
+                            }
                             app.scroll_up(3);
                         }
                         MouseEventKind::ScrollDown => {
+                            if let Some(panel) = app.hit_test_panel(mouse.column, mouse.row) {
+                                app.focused_panel = panel;
+                            }
                             app.scroll_down(3);
                         }
                         _ => {}
