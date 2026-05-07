@@ -11,8 +11,27 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusBlock {
     JobList,
+    Details,
     Stdout,
     Stderr,
+}
+
+impl FocusBlock {
+    /// Which tab in the right panel this focus implies.
+    pub fn right_tab(self) -> RightTab {
+        match self {
+            FocusBlock::Details => RightTab::Details,
+            FocusBlock::Stdout | FocusBlock::Stderr => RightTab::Output,
+            FocusBlock::JobList => RightTab::Output,
+        }
+    }
+}
+
+/// Tabs shown in the right-hand panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightTab {
+    Details,
+    Output,
 }
 
 /// Backwards-compatible alias for the legacy name.
@@ -42,10 +61,11 @@ impl LayoutMode {
 }
 
 impl FocusBlock {
-    /// Cycle Tab key forward: JobList → Stdout → Stderr → JobList.
+    /// Cycle Tab key forward: JobList → Details → Stdout → Stderr → JobList.
     pub fn next(self) -> Self {
         match self {
-            FocusBlock::JobList => FocusBlock::Stdout,
+            FocusBlock::JobList => FocusBlock::Details,
+            FocusBlock::Details => FocusBlock::Stdout,
             FocusBlock::Stdout => FocusBlock::Stderr,
             FocusBlock::Stderr => FocusBlock::JobList,
         }
@@ -165,6 +185,10 @@ pub struct App {
     pub stdout_panel_rect: Rect,
     pub stderr_panel_rect: Rect,
     pub joblist_panel_rect: Rect,
+    pub details_panel_rect: Rect,
+    pub tab_details_rect: Rect,
+    pub tab_output_rect: Rect,
+    pub right_panel_rect: Rect,
 }
 
 impl App {
@@ -187,6 +211,10 @@ impl App {
             stdout_panel_rect: Rect::default(),
             stderr_panel_rect: Rect::default(),
             joblist_panel_rect: Rect::default(),
+            details_panel_rect: Rect::default(),
+            tab_details_rect: Rect::default(),
+            tab_output_rect: Rect::default(),
+            right_panel_rect: Rect::default(),
         }
     }
 
@@ -263,7 +291,7 @@ impl App {
         let path = match self.focused_panel {
             FocusBlock::Stdout => &job.info.stdout_path,
             FocusBlock::Stderr => &job.info.stderr_path,
-            FocusBlock::JobList => return None,
+            FocusBlock::JobList | FocusBlock::Details => return None,
         };
         if path.as_os_str().is_empty() {
             None
@@ -315,7 +343,7 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList => {}
+                    FocusBlock::JobList | FocusBlock::Details => {}
                     FocusBlock::Stdout => {
                         let visible_lines = self.stdout_panel_height;
                         let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
@@ -358,7 +386,7 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList => {}
+                    FocusBlock::JobList | FocusBlock::Details => {}
                     FocusBlock::Stdout => {
                         let visible_lines = self.stdout_panel_height;
                         let total = wrap_lines_count(&job.stdout_lines, self.stdout_panel_width);
@@ -399,7 +427,7 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList => {}
+                    FocusBlock::JobList | FocusBlock::Details => {}
                     FocusBlock::Stdout => {
                         job.stdout_scroll = 0;
                         job.stdout_scroll_mode = true;
@@ -418,7 +446,7 @@ impl App {
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
-                    FocusBlock::JobList => {}
+                    FocusBlock::JobList | FocusBlock::Details => {}
                     FocusBlock::Stdout => {
                         job.scroll_stdout_to_bottom(self.stdout_panel_height, self.stdout_panel_width);
                     }
@@ -454,42 +482,64 @@ impl App {
 
         let body_area = main_chunks[0];
 
-        match self.layout {
+        let (joblist_rect, right_rect, output_dir) = match self.layout {
             LayoutMode::Horizontal => {
                 let body_chunks = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
                     .split(body_area);
-                let output_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(body_chunks[1]);
-                self.joblist_panel_rect = body_chunks[0];
-                self.stdout_panel_rect = output_chunks[0];
-                self.stderr_panel_rect = output_chunks[1];
-                self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
-                self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_width = output_chunks[1].width.saturating_sub(2).max(1) as usize;
+                (body_chunks[0], body_chunks[1], Direction::Vertical)
             }
             LayoutMode::Vertical => {
                 let body_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
                     .split(body_area);
+                (body_chunks[0], body_chunks[1], Direction::Horizontal)
+            }
+        };
+
+        self.joblist_panel_rect = joblist_rect;
+        self.right_panel_rect = right_rect;
+
+        // Right panel split: 1-row tab strip on top + content below.
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(right_rect);
+        let tab_strip = right_chunks[0];
+        let tab_content = right_chunks[1];
+
+        // Tab strip click rects: split horizontally 50/50 for [Details | Output].
+        let tab_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(tab_strip);
+        self.tab_details_rect = tab_chunks[0];
+        self.tab_output_rect = tab_chunks[1];
+
+        // Tab content rects depend on the active tab.
+        match self.focused_panel.right_tab() {
+            RightTab::Details => {
+                self.details_panel_rect = tab_content;
+                self.stdout_panel_rect = Rect::default();
+                self.stderr_panel_rect = Rect::default();
+            }
+            RightTab::Output => {
+                self.details_panel_rect = Rect::default();
                 let output_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
+                    .direction(output_dir)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(body_chunks[1]);
-                self.joblist_panel_rect = body_chunks[0];
+                    .split(tab_content);
                 self.stdout_panel_rect = output_chunks[0];
                 self.stderr_panel_rect = output_chunks[1];
-                self.stdout_panel_height = output_chunks[0].height.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
-                self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_width = output_chunks[1].width.saturating_sub(2).max(1) as usize;
             }
         }
+
+        self.stdout_panel_height = self.stdout_panel_rect.height.saturating_sub(2).max(1) as usize;
+        self.stderr_panel_height = self.stderr_panel_rect.height.saturating_sub(2).max(1) as usize;
+        self.stdout_panel_width = self.stdout_panel_rect.width.saturating_sub(2).max(1) as usize;
+        self.stderr_panel_width = self.stderr_panel_rect.width.saturating_sub(2).max(1) as usize;
 
         self.max_visible_lines = self.stdout_panel_height;
     }
@@ -497,7 +547,20 @@ impl App {
     pub fn hit_test_panel(&self, col: u16, row: u16) -> Option<FocusBlock> {
         use ratatui::layout::Position;
         let pos = Position::new(col, row);
-        if self.stdout_panel_rect.contains(pos) {
+        if self.tab_details_rect.contains(pos) {
+            return Some(FocusBlock::Details);
+        }
+        if self.tab_output_rect.contains(pos) {
+            // Default to stdout when clicking the Output tab title.
+            return Some(if self.focused_panel == FocusBlock::Stderr {
+                FocusBlock::Stderr
+            } else {
+                FocusBlock::Stdout
+            });
+        }
+        if self.details_panel_rect.contains(pos) {
+            Some(FocusBlock::Details)
+        } else if self.stdout_panel_rect.contains(pos) {
             Some(FocusBlock::Stdout)
         } else if self.stderr_panel_rect.contains(pos) {
             Some(FocusBlock::Stderr)
@@ -532,7 +595,7 @@ impl App {
                 return match self.focused_panel {
                     FocusBlock::Stdout => job.stdout_scroll_mode,
                     FocusBlock::Stderr => job.stderr_scroll_mode,
-                    FocusBlock::JobList => false,
+                    FocusBlock::JobList | FocusBlock::Details => false,
                 };
             }
         }

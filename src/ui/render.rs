@@ -1,6 +1,6 @@
 //! Rendering logic using Ratatui.
 
-use super::app::{wrap_lines, App, FocusBlock, LayoutMode};
+use super::app::{wrap_lines, App, FocusBlock, LayoutMode, RightTab};
 use crate::utils::JobStatus;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -63,7 +63,7 @@ fn render_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     render_status_panel(frame, app, body_chunks[0]);
-    render_output_panel_vertical(frame, app, body_chunks[1]);
+    render_right_panel(frame, app, body_chunks[1], Direction::Vertical);
 }
 
 fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -73,7 +73,133 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     render_status_panel(frame, app, body_chunks[0]);
-    render_output_panel_horizontal(frame, app, body_chunks[1]);
+    render_right_panel(frame, app, body_chunks[1], Direction::Horizontal);
+}
+
+fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, output_dir: Direction) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    let tab_strip = chunks[0];
+    let content = chunks[1];
+
+    render_tab_strip(frame, app, tab_strip);
+
+    match app.focused_panel.right_tab() {
+        RightTab::Details => render_details_tab(frame, app, content),
+        RightTab::Output => render_output_tab(frame, app, content, output_dir),
+    }
+}
+
+fn render_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
+    let active = app.focused_panel.right_tab();
+    let make_span = |label: &str, is_active: bool| {
+        let style = if is_active {
+            Style::default().fg(FOCUS_COLOR).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(UNFOCUS_COLOR)
+        };
+        Span::styled(format!("  {}  ", label), style)
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let details = Paragraph::new(Line::from(make_span("Details", active == RightTab::Details)))
+        .alignment(Alignment::Center);
+    let output = Paragraph::new(Line::from(make_span("Output", active == RightTab::Output)))
+        .alignment(Alignment::Center);
+
+    frame.render_widget(details, chunks[0]);
+    frame.render_widget(output, chunks[1]);
+}
+
+fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
+    let label_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let placeholder = "—".to_string();
+
+    let lines: Vec<Line> = match app.current_job_id.and_then(|id| app.jobs.get(&id)) {
+        Some(job) => {
+            let pick = |s: &str| if s.is_empty() { placeholder.clone() } else { s.to_string() };
+            let work_dir = job.info.work_dir.display().to_string();
+            let stdout = job.info.stdout_path.display().to_string();
+            let stderr = job.info.stderr_path.display().to_string();
+
+            vec![
+                Line::from(vec![
+                    Span::styled("Job ID:   ", label_style),
+                    Span::raw(format!("{}", job.info.job_id)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Name:     ", label_style),
+                    Span::raw(pick(&job.info.job_name)),
+                ]),
+                Line::from(vec![
+                    Span::styled("State:    ", label_style),
+                    Span::raw(format!("{}", job.status)),
+                    Span::raw("    "),
+                    Span::styled("Raw: ", label_style),
+                    Span::raw(pick(&job.info.state)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Node:     ", label_style),
+                    Span::raw(pick(&job.info.node_list)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Limit:    ", label_style),
+                    Span::raw(pick(&job.info.time_limit)),
+                    Span::raw("    "),
+                    Span::styled("Elapsed: ", label_style),
+                    Span::raw(pick(&job.info.elapsed)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Start:    ", label_style),
+                    Span::raw(pick(&job.info.start_time)),
+                ]),
+                Line::from(vec![
+                    Span::styled("End:      ", label_style),
+                    Span::raw(pick(&job.info.end_time)),
+                ]),
+                Line::from(vec![
+                    Span::styled("WorkDir:  ", label_style),
+                    Span::raw(if work_dir.is_empty() { placeholder.clone() } else { work_dir }),
+                ]),
+                Line::from(vec![
+                    Span::styled("StdOut:   ", label_style),
+                    Span::raw(if stdout.is_empty() { placeholder.clone() } else { stdout }),
+                ]),
+                Line::from(vec![
+                    Span::styled("StdErr:   ", label_style),
+                    Span::raw(if stderr.is_empty() { placeholder.clone() } else { stderr }),
+                ]),
+            ]
+        }
+        None => vec![Line::from(Span::raw("No job selected"))],
+    };
+
+    let focused = app.focused_panel == FocusBlock::Details;
+    let paragraph = Paragraph::new(lines).block(block_for("Details", focused));
+    frame.render_widget(paragraph, area);
+}
+
+fn render_output_tab(frame: &mut Frame, app: &mut App, area: Rect, output_dir: Direction) {
+    if app.current_job_id.is_none() {
+        let focused = matches!(app.focused_panel, FocusBlock::Stdout | FocusBlock::Stderr);
+        let empty = Paragraph::new("Select a job to view output")
+            .block(block_for("Output", focused));
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(output_dir)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    render_stdout_panel(frame, app, chunks[0]);
+    render_stderr_panel(frame, app, chunks[1]);
 }
 
 fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -86,18 +212,7 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Reserve bottom rows for selected-job details (only if there's enough vertical space).
-    // Details block: borders (2) + 3 lines of content = 5 rows.
-    let details_height: u16 = 5;
-    let (table_area, details_area) = if area.height > details_height + 4 {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(details_height)])
-            .split(area);
-        (chunks[0], Some(chunks[1]))
-    } else {
-        (area, None)
-    };
+    let table_area = area;
 
     // Dynamic name truncation: use available width instead of hardcoded 20
     // area.width - 2 (borders) - 12*3 (fixed cols) - 3 (column gaps) = area.width - 41
@@ -172,97 +287,6 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     .block(block_for(panel_title, focused));
 
     frame.render_stateful_widget(table, table_area, &mut app.table_state);
-
-    if let Some(details_area) = details_area {
-        render_job_details(frame, app, details_area);
-    }
-}
-
-fn render_job_details(frame: &mut Frame, app: &App, area: Rect) {
-    let label_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
-
-    let lines: Vec<Line> = match app.current_job_id.and_then(|id| app.jobs.get(&id)) {
-        Some(job) => {
-            let placeholder = "—".to_string();
-            let node = if job.info.node_list.is_empty() {
-                &placeholder
-            } else {
-                &job.info.node_list
-            };
-            let limit = if job.info.time_limit.is_empty() {
-                &placeholder
-            } else {
-                &job.info.time_limit
-            };
-            let elapsed = if job.info.elapsed.is_empty() {
-                &placeholder
-            } else {
-                &job.info.elapsed
-            };
-            let work_dir = job.info.work_dir.display().to_string();
-            let work_dir = if work_dir.is_empty() { &placeholder } else { &work_dir };
-
-            vec![
-                Line::from(vec![
-                    Span::styled("Node:  ", label_style),
-                    Span::raw(node.clone()),
-                    Span::raw("    "),
-                    Span::styled("Limit: ", label_style),
-                    Span::raw(limit.clone()),
-                    Span::raw("    "),
-                    Span::styled("Elapsed: ", label_style),
-                    Span::raw(elapsed.clone()),
-                ]),
-                Line::from(vec![
-                    Span::styled("WorkDir: ", label_style),
-                    Span::raw(work_dir.clone()),
-                ]),
-                Line::from(vec![
-                    Span::styled("StdOut: ", label_style),
-                    Span::raw(job.info.stdout_path.display().to_string()),
-                ]),
-            ]
-        }
-        None => vec![Line::from(Span::raw("No job selected"))],
-    };
-
-    let focused = app.focused_panel == FocusBlock::JobList;
-    let paragraph = Paragraph::new(lines).block(block_for("Details", focused));
-    frame.render_widget(paragraph, area);
-}
-
-fn render_output_panel_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.current_job_id.is_none() {
-        let empty = Paragraph::new("Select a job to view output")
-            .block(block_for("Output", false));
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    render_stdout_panel(frame, app, chunks[0]);
-    render_stderr_panel(frame, app, chunks[1]);
-}
-
-fn render_output_panel_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
-    if app.current_job_id.is_none() {
-        let empty = Paragraph::new("Select a job to view output")
-            .block(block_for("Output", false));
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    render_stdout_panel(frame, app, chunks[0]);
-    render_stderr_panel(frame, app, chunks[1]);
 }
 
 fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
