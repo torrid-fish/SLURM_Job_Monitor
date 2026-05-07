@@ -76,7 +76,7 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
     render_right_panel(frame, app, body_chunks[1], Direction::Vertical);
 }
 
-fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, output_dir: Direction) {
+fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, _output_dir: Direction) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -88,7 +88,7 @@ fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, output_dir: 
 
     match app.focused_panel.right_tab() {
         RightTab::Details => render_details_tab(frame, app, content),
-        RightTab::Output => render_output_tab(frame, app, content, output_dir),
+        RightTab::Output => render_output_tab(frame, app, content),
     }
 }
 
@@ -116,7 +116,7 @@ fn render_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(output, chunks[1]);
 }
 
-fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
+fn render_details_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     let label_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
     let section_style = Style::default()
         .fg(Color::Cyan)
@@ -221,7 +221,22 @@ fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let focused = app.focused_panel == FocusBlock::Details;
-    let paragraph = Paragraph::new(lines).block(block_for("Details", focused));
+    let total_lines = lines.len() as u16;
+    // Inner viewport height = area minus the 2 border rows.
+    let viewport = area.height.saturating_sub(2);
+    let max_scroll = total_lines.saturating_sub(viewport);
+    app.details_scroll_max = max_scroll;
+    let scroll = app.details_scroll.min(max_scroll);
+    app.details_scroll = scroll;
+
+    let title = if max_scroll > 0 {
+        format!("Details ({}/{})", scroll + 1, max_scroll + 1)
+    } else {
+        "Details".to_string()
+    };
+    let paragraph = Paragraph::new(lines)
+        .scroll((scroll, 0))
+        .block(block_for(&title, focused));
     frame.render_widget(paragraph, area);
 }
 
@@ -242,22 +257,110 @@ fn parse_tres_field(tres: &str, key: &str) -> Option<String> {
     None
 }
 
-fn render_output_tab(frame: &mut Frame, app: &mut App, area: Rect, output_dir: Direction) {
-    if app.current_job_id.is_none() {
-        let focused = matches!(app.focused_panel, FocusBlock::Stdout | FocusBlock::Stderr);
-        let empty = Paragraph::new("Select a job to view output")
-            .block(block_for("Output", focused));
-        frame.render_widget(empty, area);
-        return;
-    }
+fn render_output_tab(frame: &mut Frame, app: &mut App, area: Rect) {
+    let focused = matches!(app.focused_panel, FocusBlock::Stdout | FocusBlock::Stderr);
+
+    let job_id = match app.current_job_id {
+        Some(id) => id,
+        None => {
+            let empty = Paragraph::new("Select a job to view output")
+                .block(block_for("Output", focused));
+            frame.render_widget(empty, area);
+            return;
+        }
+    };
+
+    let title = format!("Output (Job {})", job_id);
+    let outer = block_for(&title, focused);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
 
     let chunks = Layout::default()
-        .direction(output_dir)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Length(1),
+            Constraint::Percentage(50),
+        ])
+        .split(inner);
 
-    render_stdout_panel(frame, app, chunks[0]);
-    render_stderr_panel(frame, app, chunks[1]);
+    render_inner_log(frame, app, chunks[0], LogKind::Stdout);
+    render_separator(frame, chunks[1]);
+    render_inner_log(frame, app, chunks[2], LogKind::Stderr);
+}
+
+#[derive(Clone, Copy)]
+enum LogKind {
+    Stdout,
+    Stderr,
+}
+
+fn render_separator(frame: &mut Frame, area: Rect) {
+    let line: String = "─".repeat(area.width as usize);
+    let p = Paragraph::new(Span::styled(
+        line,
+        Style::default().fg(UNFOCUS_COLOR),
+    ));
+    frame.render_widget(p, area);
+}
+
+fn render_inner_log(frame: &mut Frame, app: &App, area: Rect, kind: LogKind) {
+    if area.height == 0 {
+        return;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    let header_area = chunks[0];
+    let content_area = chunks[1];
+
+    let job_id = match app.current_job_id {
+        Some(id) => id,
+        None => return,
+    };
+    let job = match app.jobs.get(&job_id) {
+        Some(j) => j,
+        None => return,
+    };
+
+    let (label, focused, lines, scroll, scroll_mode) = match kind {
+        LogKind::Stdout => (
+            "STDOUT",
+            app.focused_panel == FocusBlock::Stdout,
+            &job.stdout_lines,
+            job.stdout_scroll,
+            job.stdout_scroll_mode,
+        ),
+        LogKind::Stderr => (
+            "STDERR",
+            app.focused_panel == FocusBlock::Stderr,
+            &job.stderr_lines,
+            job.stderr_scroll,
+            job.stderr_scroll_mode,
+        ),
+    };
+
+    let scroll_indicator = if scroll_mode { " [SCROLL]" } else { "" };
+    let header_style = if focused {
+        Style::default().fg(FOCUS_COLOR).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(UNFOCUS_COLOR).add_modifier(Modifier::BOLD)
+    };
+    let header = Paragraph::new(Span::styled(
+        format!("▌ {}{}", label, scroll_indicator),
+        header_style,
+    ));
+    frame.render_widget(header, header_area);
+
+    let wrapped = wrap_lines(lines, content_area.width as usize);
+    let visible = get_visible_lines(&wrapped, scroll, content_area.height as usize);
+    let content = if visible.is_empty() {
+        "[No output yet - waiting for file updates...]".to_string()
+    } else {
+        visible.join("\n")
+    };
+    frame.render_widget(Paragraph::new(content), content_area);
 }
 
 fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -345,82 +448,6 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     .block(block_for(panel_title, focused));
 
     frame.render_stateful_widget(table, table_area, &mut app.table_state);
-}
-
-fn render_stdout_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let job_id = match app.current_job_id {
-        Some(id) => id,
-        None => return,
-    };
-
-    let job = match app.jobs.get(&job_id) {
-        Some(j) => j,
-        None => return,
-    };
-
-    let is_focused = app.focused_panel == FocusBlock::Stdout;
-
-    let scroll_indicator = if job.stdout_scroll_mode {
-        " [SCROLL]"
-    } else {
-        ""
-    };
-
-    let title = format!("STDOUT (Job {}){}", job_id, scroll_indicator);
-
-    // Calculate visible lines
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let wrapped_lines = wrap_lines(&job.stdout_lines, inner_width);
-    let visible_lines = get_visible_lines(&wrapped_lines, job.stdout_scroll, inner_height);
-
-    let content = if visible_lines.is_empty() {
-        "[No output yet - waiting for file updates...]".to_string()
-    } else {
-        visible_lines.join("\n")
-    };
-
-    let paragraph = Paragraph::new(content).block(block_for(&title, is_focused));
-
-    frame.render_widget(paragraph, area);
-}
-
-fn render_stderr_panel(frame: &mut Frame, app: &App, area: Rect) {
-    let job_id = match app.current_job_id {
-        Some(id) => id,
-        None => return,
-    };
-
-    let job = match app.jobs.get(&job_id) {
-        Some(j) => j,
-        None => return,
-    };
-
-    let is_focused = app.focused_panel == FocusBlock::Stderr;
-
-    let scroll_indicator = if job.stderr_scroll_mode {
-        " [SCROLL]"
-    } else {
-        ""
-    };
-
-    let title = format!("STDERR (Job {}){}", job_id, scroll_indicator);
-
-    // Calculate visible lines
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let wrapped_lines = wrap_lines(&job.stderr_lines, inner_width);
-    let visible_lines = get_visible_lines(&wrapped_lines, job.stderr_scroll, inner_height);
-
-    let content = if visible_lines.is_empty() {
-        "[No output yet - waiting for file updates...]".to_string()
-    } else {
-        visible_lines.join("\n")
-    };
-
-    let paragraph = Paragraph::new(content).block(block_for(&title, is_focused));
-
-    frame.render_widget(paragraph, area);
 }
 
 fn get_visible_lines(lines: &[String], scroll_pos: usize, max_height: usize) -> Vec<String> {

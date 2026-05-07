@@ -189,6 +189,8 @@ pub struct App {
     pub tab_details_rect: Rect,
     pub tab_output_rect: Rect,
     pub right_panel_rect: Rect,
+    pub details_scroll: u16,
+    pub details_scroll_max: u16,
 }
 
 impl App {
@@ -215,6 +217,8 @@ impl App {
             tab_details_rect: Rect::default(),
             tab_output_rect: Rect::default(),
             right_panel_rect: Rect::default(),
+            details_scroll: 0,
+            details_scroll_max: 0,
         }
     }
 
@@ -340,6 +344,10 @@ impl App {
             }
             return;
         }
+        if self.focused_panel == FocusBlock::Details {
+            self.details_scroll = self.details_scroll.saturating_sub(lines as u16);
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
@@ -383,6 +391,10 @@ impl App {
             }
             return;
         }
+        if self.focused_panel == FocusBlock::Details {
+            self.details_scroll = (self.details_scroll + lines as u16).min(self.details_scroll_max);
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
@@ -424,6 +436,10 @@ impl App {
 
     /// Scroll to top.
     pub fn scroll_to_top(&mut self) {
+        if self.focused_panel == FocusBlock::Details {
+            self.details_scroll = 0;
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
@@ -443,6 +459,10 @@ impl App {
 
     /// Scroll to bottom (exit scroll mode).
     pub fn scroll_to_bottom(&mut self) {
+        if self.focused_panel == FocusBlock::Details {
+            self.details_scroll = self.details_scroll_max;
+            return;
+        }
         if let Some(job_id) = self.current_job_id {
             if let Some(job) = self.jobs.get_mut(&job_id) {
                 match self.focused_panel {
@@ -526,20 +546,35 @@ impl App {
                 self.stderr_panel_rect = Rect::default();
             }
             RightTab::Output => {
+                let _ = output_dir; // stdout/stderr are always stacked vertically now
                 self.details_panel_rect = Rect::default();
+                // Inner area of the merged outer block (one rounded border).
+                let inner = Rect {
+                    x: tab_content.x.saturating_add(1),
+                    y: tab_content.y.saturating_add(1),
+                    width: tab_content.width.saturating_sub(2),
+                    height: tab_content.height.saturating_sub(2),
+                };
                 let output_chunks = Layout::default()
-                    .direction(output_dir)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(tab_content);
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(50),
+                        Constraint::Length(1),
+                        Constraint::Percentage(50),
+                    ])
+                    .split(inner);
                 self.stdout_panel_rect = output_chunks[0];
-                self.stderr_panel_rect = output_chunks[1];
+                self.stderr_panel_rect = output_chunks[2];
             }
         }
 
-        self.stdout_panel_height = self.stdout_panel_rect.height.saturating_sub(2).max(1) as usize;
-        self.stderr_panel_height = self.stderr_panel_rect.height.saturating_sub(2).max(1) as usize;
-        self.stdout_panel_width = self.stdout_panel_rect.width.saturating_sub(2).max(1) as usize;
-        self.stderr_panel_width = self.stderr_panel_rect.width.saturating_sub(2).max(1) as usize;
+        // Each section reserves 1 row inside for its own header label, so the
+        // visible content area is one row shorter. No inner border on either
+        // side now that the merged block draws a single border.
+        self.stdout_panel_height = self.stdout_panel_rect.height.saturating_sub(1).max(1) as usize;
+        self.stderr_panel_height = self.stderr_panel_rect.height.saturating_sub(1).max(1) as usize;
+        self.stdout_panel_width = self.stdout_panel_rect.width.max(1) as usize;
+        self.stderr_panel_width = self.stderr_panel_rect.width.max(1) as usize;
 
         self.max_visible_lines = self.stdout_panel_height;
     }
