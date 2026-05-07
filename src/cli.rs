@@ -375,6 +375,12 @@ fn run_event_loop(
                                     app.remove_current_job();
                                 }
                             }
+                            KeyCode::Char('+') | KeyCode::Char('=') => {
+                                app.zoomed = true;
+                            }
+                            KeyCode::Char('-') | KeyCode::Char('_') => {
+                                app.zoomed = false;
+                            }
                             KeyCode::Up => {
                                 app.scroll_up(1);
                             }

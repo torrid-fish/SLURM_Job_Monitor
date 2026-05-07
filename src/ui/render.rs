@@ -1,6 +1,6 @@
 //! Rendering logic using Ratatui.
 
-use super::app::{wrap_lines, App, FocusBlock, LayoutMode, RightTab};
+use super::app::{wrap_lines, App, FocusBlock, RightTab};
 use crate::utils::JobStatus;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -38,10 +38,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let body_area = main_chunks[0];
 
-    match app.layout {
-        LayoutMode::Horizontal => render_horizontal(frame, app, body_area),
-        LayoutMode::Vertical => render_vertical(frame, app, body_area),
-    }
+    render_body(frame, app, body_area);
 
     render_brand(frame, main_chunks[1]);
 }
@@ -56,17 +53,19 @@ fn render_brand(frame: &mut Frame, area: Rect) {
     frame.render_widget(p, area);
 }
 
-fn render_horizontal(frame: &mut Frame, app: &mut App, area: Rect) {
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
+fn render_body(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Fixed layout: JobList on top, info panel below. When zoomed, only the
+    // panel containing the focused block is shown — the App computed its rect
+    // and zeroed the other side.
+    if app.zoomed {
+        if matches!(app.focused_panel, FocusBlock::JobList) {
+            render_status_panel(frame, app, area);
+        } else {
+            render_right_panel(frame, app, area, Direction::Vertical);
+        }
+        return;
+    }
 
-    render_status_panel(frame, app, body_chunks[0]);
-    render_right_panel(frame, app, body_chunks[1], Direction::Vertical);
-}
-
-fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])

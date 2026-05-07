@@ -37,28 +37,6 @@ pub enum RightTab {
 /// Backwards-compatible alias for the legacy name.
 pub type FocusedPanel = FocusBlock;
 
-/// Layout mode for the TUI. Auto-selected based on terminal aspect ratio.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayoutMode {
-    /// Wider than tall: JobList left, output right (stdout above stderr).
-    Horizontal,
-    /// Taller than wide: JobList top, output below (stdout above stderr).
-    Vertical,
-}
-
-impl LayoutMode {
-    /// Pick a layout based on terminal width vs. height.
-    ///
-    /// Terminal cells are roughly twice as tall as they are wide, so we compare
-    /// `width` to `height * 2` to get a perceptually-square threshold.
-    pub fn auto(width: u16, height: u16) -> Self {
-        if width as u32 >= (height as u32) * 2 {
-            LayoutMode::Horizontal
-        } else {
-            LayoutMode::Vertical
-        }
-    }
-}
 
 impl FocusBlock {
     /// Cycle Tab key forward: JobList → Details → Stdout → Stderr → JobList.
@@ -171,7 +149,7 @@ pub struct App {
     pub jobs: HashMap<JobId, JobData>,
     pub current_job_id: Option<JobId>,
     pub focused_panel: FocusedPanel,
-    pub layout: LayoutMode,
+    pub zoomed: bool,
     pub should_quit: bool,
     pub max_visible_lines: usize,
     pub stdout_panel_height: usize,
@@ -199,7 +177,7 @@ impl App {
             jobs: HashMap::new(),
             current_job_id: None,
             focused_panel: FocusBlock::JobList,
-            layout: LayoutMode::Horizontal,
+            zoomed: false,
             should_quit: false,
             max_visible_lines: 20,
             stdout_panel_height: 20,
@@ -491,9 +469,6 @@ impl App {
     }
 
     pub fn update_panel_heights(&mut self, frame_area: Rect) {
-        // Auto-pick layout based on terminal aspect ratio.
-        self.layout = LayoutMode::auto(frame_area.width, frame_area.height);
-
         // Reserve 1 row at the bottom for the brand mark.
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -502,25 +477,38 @@ impl App {
 
         let body_area = main_chunks[0];
 
-        let (joblist_rect, right_rect, output_dir) = match self.layout {
-            LayoutMode::Horizontal => {
-                let body_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-                    .split(body_area);
-                (body_chunks[0], body_chunks[1], Direction::Vertical)
+        // Fixed layout: JobList on top, info panel below. When zoomed, the
+        // panel containing the focused block fills the entire body.
+        let (joblist_rect, right_rect) = if self.zoomed {
+            match self.focused_panel {
+                FocusBlock::JobList => (body_area, Rect::default()),
+                _ => (Rect::default(), body_area),
             }
-            LayoutMode::Vertical => {
-                let body_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-                    .split(body_area);
-                (body_chunks[0], body_chunks[1], Direction::Vertical)
-            }
+        } else {
+            let body_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+                .split(body_area);
+            (body_chunks[0], body_chunks[1])
         };
 
         self.joblist_panel_rect = joblist_rect;
         self.right_panel_rect = right_rect;
+
+        // If the right panel is collapsed (zoomed JobList), skip its layout.
+        if right_rect.width == 0 || right_rect.height == 0 {
+            self.tab_details_rect = Rect::default();
+            self.tab_output_rect = Rect::default();
+            self.details_panel_rect = Rect::default();
+            self.stdout_panel_rect = Rect::default();
+            self.stderr_panel_rect = Rect::default();
+            self.stdout_panel_height = 1;
+            self.stderr_panel_height = 1;
+            self.stdout_panel_width = 1;
+            self.stderr_panel_width = 1;
+            self.max_visible_lines = 1;
+            return;
+        }
 
         // The tab strip lives inside the outer block's top border. Inner is the
         // outer rect shrunk by 1 cell on each side.
@@ -557,7 +545,6 @@ impl App {
                 self.stderr_panel_rect = Rect::default();
             }
             RightTab::Output => {
-                let _ = output_dir; // stdout/stderr are always stacked vertically now
                 self.details_panel_rect = Rect::default();
                 // The outer block's border is the right_rect's border itself,
                 // so split tab_content directly into stdout / sep / stderr.
