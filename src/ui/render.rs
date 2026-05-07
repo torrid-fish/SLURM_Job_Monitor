@@ -47,10 +47,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_brand(frame: &mut Frame, area: Rect) {
-    let text = format!("lazyslurm v{}", env!("CARGO_PKG_VERSION"));
+    let text = format!(" lazyslurm v{} ", env!("CARGO_PKG_VERSION"));
     let p = Paragraph::new(Span::styled(
         text,
-        Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     ))
     .alignment(Alignment::Right);
     frame.render_widget(p, area);
