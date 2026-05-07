@@ -18,35 +18,25 @@ pub enum FocusBlock {
 /// Backwards-compatible alias for the legacy name.
 pub type FocusedPanel = FocusBlock;
 
-/// Layout mode for the TUI
+/// Layout mode for the TUI. Auto-selected based on terminal aspect ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
-    /// Left=status, Right top=stdout, Right bottom=stderr
+    /// Wider than tall: JobList left, output right (stdout above stderr).
     Horizontal,
-    /// Top=status, Bottom left=stdout, Bottom right=stderr
+    /// Taller than wide: JobList top, output below (stdout above stderr).
     Vertical,
-    /// Top=status, Middle=stdout, Bottom=stderr (all full width)
-    Stacked,
-    /// Top=stdout, Bottom=stderr (status info in header only, no status table)
-    FullLog,
 }
 
 impl LayoutMode {
-    pub fn next(self) -> Self {
-        match self {
-            LayoutMode::Horizontal => LayoutMode::Vertical,
-            LayoutMode::Vertical => LayoutMode::Stacked,
-            LayoutMode::Stacked => LayoutMode::FullLog,
-            LayoutMode::FullLog => LayoutMode::Horizontal,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            LayoutMode::Horizontal => "Horizontal",
-            LayoutMode::Vertical => "Vertical",
-            LayoutMode::Stacked => "Stacked",
-            LayoutMode::FullLog => "FullLog",
+    /// Pick a layout based on terminal width vs. height.
+    ///
+    /// Terminal cells are roughly twice as tall as they are wide, so we compare
+    /// `width` to `height * 2` to get a perceptually-square threshold.
+    pub fn auto(width: u16, height: u16) -> Self {
+        if width as u32 >= (height as u32) * 2 {
+            LayoutMode::Horizontal
+        } else {
+            LayoutMode::Vertical
         }
     }
 }
@@ -266,10 +256,6 @@ impl App {
         self.focused_panel.toggle();
     }
 
-    pub fn cycle_layout(&mut self) {
-        self.layout = self.layout.next();
-    }
-
     /// Get the file path of the currently focused log panel (stdout or stderr).
     pub fn get_focused_file_path(&self) -> Option<PathBuf> {
         let job_id = self.current_job_id?;
@@ -457,6 +443,9 @@ impl App {
     }
 
     pub fn update_panel_heights(&mut self, frame_area: Rect) {
+        // Auto-pick layout based on terminal aspect ratio.
+        self.layout = LayoutMode::auto(frame_area.width, frame_area.height);
+
         // Reserve 1 row at the bottom for the brand mark.
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -499,32 +488,6 @@ impl App {
                 self.stderr_panel_height = output_chunks[1].height.saturating_sub(2).max(1) as usize;
                 self.stdout_panel_width = output_chunks[0].width.saturating_sub(2).max(1) as usize;
                 self.stderr_panel_width = output_chunks[1].width.saturating_sub(2).max(1) as usize;
-            }
-            LayoutMode::Stacked => {
-                let body_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(40)])
-                    .split(body_area);
-                self.joblist_panel_rect = body_chunks[0];
-                self.stdout_panel_rect = body_chunks[1];
-                self.stderr_panel_rect = body_chunks[2];
-                self.stdout_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_height = body_chunks[2].height.saturating_sub(2).max(1) as usize;
-                self.stdout_panel_width = body_chunks[1].width.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_width = body_chunks[2].width.saturating_sub(2).max(1) as usize;
-            }
-            LayoutMode::FullLog => {
-                let body_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(body_area);
-                self.joblist_panel_rect = Rect::default();
-                self.stdout_panel_rect = body_chunks[0];
-                self.stderr_panel_rect = body_chunks[1];
-                self.stdout_panel_height = body_chunks[0].height.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_height = body_chunks[1].height.saturating_sub(2).max(1) as usize;
-                self.stdout_panel_width = body_chunks[0].width.saturating_sub(2).max(1) as usize;
-                self.stderr_panel_width = body_chunks[1].width.saturating_sub(2).max(1) as usize;
             }
         }
 

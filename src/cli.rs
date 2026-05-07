@@ -375,9 +375,6 @@ fn run_event_loop(
                                     app.remove_current_job();
                                 }
                             }
-                            KeyCode::Char('l') => {
-                                app.cycle_layout();
-                            }
                             KeyCode::Up => {
                                 app.scroll_up(1);
                             }

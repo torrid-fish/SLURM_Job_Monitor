@@ -41,8 +41,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.layout {
         LayoutMode::Horizontal => render_horizontal(frame, app, body_area),
         LayoutMode::Vertical => render_vertical(frame, app, body_area),
-        LayoutMode::Stacked => render_stacked(frame, app, body_area),
-        LayoutMode::FullLog => render_full_log(frame, app, body_area),
     }
 
     render_brand(frame, main_chunks[1]);
@@ -76,27 +74,6 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
 
     render_status_panel(frame, app, body_chunks[0]);
     render_output_panel_horizontal(frame, app, body_chunks[1]);
-}
-
-fn render_stacked(frame: &mut Frame, app: &mut App, area: Rect) {
-    let body_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(20), Constraint::Percentage(40), Constraint::Percentage(40)])
-        .split(area);
-
-    render_status_panel(frame, app, body_chunks[0]);
-    render_stdout_panel(frame, app, body_chunks[1]);
-    render_stderr_panel(frame, app, body_chunks[2]);
-}
-
-fn render_full_log(frame: &mut Frame, app: &mut App, area: Rect) {
-    let body_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-
-    render_stdout_panel(frame, app, body_chunks[0]);
-    render_stderr_panel(frame, app, body_chunks[1]);
 }
 
 fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
