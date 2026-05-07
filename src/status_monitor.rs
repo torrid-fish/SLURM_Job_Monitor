@@ -139,12 +139,22 @@ impl StatusMonitor {
 
             // Poll each job's status
             for &job_id in &monitored_jobs {
-                let (status, info) = {
+                let (status, mut info) = {
                     let manager = job_manager.lock().unwrap();
                     let status = manager.get_job_status(job_id);
                     let info = manager.get_job_info(job_id);
                     (status, info)
                 };
+
+                // For running jobs, also pull live resource usage from sstat.
+                if status == JobStatus::Running {
+                    let stats = job_manager.lock().unwrap().get_runtime_stats(job_id);
+                    if let Some((ave_cpu, max_rss, ave_rss)) = stats {
+                        info.ave_cpu = ave_cpu;
+                        info.max_rss = max_rss;
+                        info.ave_rss = ave_rss;
+                    }
+                }
 
                 let update = StatusUpdate {
                     job_id,

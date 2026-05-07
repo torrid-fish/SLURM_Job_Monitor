@@ -118,6 +118,9 @@ fn render_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
     let label_style = Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD);
+    let section_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let placeholder = "—".to_string();
 
     let lines: Vec<Line> = match app.current_job_id.and_then(|id| app.jobs.get(&id)) {
@@ -126,14 +129,19 @@ fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
             let work_dir = job.info.work_dir.display().to_string();
             let stdout = job.info.stdout_path.display().to_string();
             let stderr = job.info.stderr_path.display().to_string();
+            let gpu_count = parse_tres_field(&job.info.alloc_tres, "gres/gpu")
+                .or_else(|| parse_tres_field(&job.info.req_tres, "gres/gpu"))
+                .unwrap_or_else(|| "0".to_string());
+            let mem_alloc = parse_tres_field(&job.info.alloc_tres, "mem")
+                .unwrap_or_else(|| placeholder.clone());
 
             vec![
+                Line::from(Span::styled("── Identity ──", section_style)),
                 Line::from(vec![
                     Span::styled("Job ID:   ", label_style),
                     Span::raw(format!("{}", job.info.job_id)),
-                ]),
-                Line::from(vec![
-                    Span::styled("Name:     ", label_style),
+                    Span::raw("    "),
+                    Span::styled("Name: ", label_style),
                     Span::raw(pick(&job.info.job_name)),
                 ]),
                 Line::from(vec![
@@ -157,11 +165,44 @@ fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
                 Line::from(vec![
                     Span::styled("Start:    ", label_style),
                     Span::raw(pick(&job.info.start_time)),
-                ]),
-                Line::from(vec![
-                    Span::styled("End:      ", label_style),
+                    Span::raw("    "),
+                    Span::styled("End: ", label_style),
                     Span::raw(pick(&job.info.end_time)),
                 ]),
+                Line::from(""),
+                Line::from(Span::styled("── Resources ──", section_style)),
+                Line::from(vec![
+                    Span::styled("CPUs:     ", label_style),
+                    Span::raw(pick(&job.info.num_cpus)),
+                    Span::raw("    "),
+                    Span::styled("GPUs: ", label_style),
+                    Span::raw(gpu_count),
+                    Span::raw("    "),
+                    Span::styled("Mem: ", label_style),
+                    Span::raw(mem_alloc),
+                ]),
+                Line::from(vec![
+                    Span::styled("AllocTRES: ", label_style),
+                    Span::raw(pick(&job.info.alloc_tres)),
+                ]),
+                Line::from(vec![
+                    Span::styled("ReqTRES:   ", label_style),
+                    Span::raw(pick(&job.info.req_tres)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled("── Live Usage (sstat) ──", section_style)),
+                Line::from(vec![
+                    Span::styled("AveCPU:   ", label_style),
+                    Span::raw(pick(&job.info.ave_cpu)),
+                    Span::raw("    "),
+                    Span::styled("MaxRSS: ", label_style),
+                    Span::raw(pick(&job.info.max_rss)),
+                    Span::raw("    "),
+                    Span::styled("AveRSS: ", label_style),
+                    Span::raw(pick(&job.info.ave_rss)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled("── Paths ──", section_style)),
                 Line::from(vec![
                     Span::styled("WorkDir:  ", label_style),
                     Span::raw(if work_dir.is_empty() { placeholder.clone() } else { work_dir }),
@@ -182,6 +223,23 @@ fn render_details_tab(frame: &mut Frame, app: &App, area: Rect) {
     let focused = app.focused_panel == FocusBlock::Details;
     let paragraph = Paragraph::new(lines).block(block_for("Details", focused));
     frame.render_widget(paragraph, area);
+}
+
+/// Extract a `key=value` field from a SLURM TRES string (e.g.
+/// `cpu=4,mem=16G,gres/gpu=2` -> `parse_tres_field("...", "gres/gpu") = Some("2")`).
+fn parse_tres_field(tres: &str, key: &str) -> Option<String> {
+    if tres.is_empty() {
+        return None;
+    }
+    for part in tres.split(',') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=') {
+            if k == key {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn render_output_tab(frame: &mut Frame, app: &mut App, area: Rect, output_dir: Direction) {

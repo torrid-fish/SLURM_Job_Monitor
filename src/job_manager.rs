@@ -31,6 +31,16 @@ pub struct JobInfo {
     pub work_dir: PathBuf,
     pub stdout_path: PathBuf,
     pub stderr_path: PathBuf,
+
+    // Resource allocation (from sacct)
+    pub num_cpus: String,
+    pub alloc_tres: String,
+    pub req_tres: String,
+
+    // Runtime resource usage (from sstat, only meaningful while running)
+    pub ave_cpu: String,
+    pub max_rss: String,
+    pub ave_rss: String,
 }
 
 /// Manages SLURM job submission, tracking, and status retrieval.
@@ -109,7 +119,7 @@ impl JobManager {
                 "sacct",
                 "-j",
                 &id_str,
-                "--format=JobID,JobName,State,Start,End,Elapsed,Timelimit,NodeList,WorkDir,StdOut,StdErr",
+                "--format=JobID,JobName,State,Start,End,Elapsed,Timelimit,NodeList,NCPUs,AllocTRES,ReqTRES,WorkDir,StdOut,StdErr",
                 "--parsable2",
             ],
             false,
@@ -126,6 +136,9 @@ impl JobManager {
                 info.elapsed = parsed.get("Elapsed").cloned().unwrap_or_default();
                 info.time_limit = parsed.get("Timelimit").cloned().unwrap_or_default();
                 info.node_list = parsed.get("NodeList").cloned().unwrap_or_default();
+                info.num_cpus = parsed.get("NCPUs").cloned().unwrap_or_default();
+                info.alloc_tres = parsed.get("AllocTRES").cloned().unwrap_or_default();
+                info.req_tres = parsed.get("ReqTRES").cloned().unwrap_or_default();
 
                 let work_dir = parsed.get("WorkDir").cloned().unwrap_or_default();
                 info.work_dir = PathBuf::from(&work_dir);
@@ -151,6 +164,43 @@ impl JobManager {
         info.stderr_path = self.find_output_file(&cwd, job_id, "err");
 
         info
+    }
+
+    /// Fetch live runtime resource usage from `sstat` for a running job.
+    ///
+    /// Returns (AveCPU, MaxRSS, AveRSS). Only meaningful while the job is
+    /// actively running; sstat returns nothing for queued or finished jobs.
+    pub fn get_runtime_stats(&self, job_id: JobId) -> Option<(String, String, String)> {
+        let id_str = job_id.to_string();
+        let result = run_slurm_command(
+            &[
+                "sstat",
+                "-j",
+                &id_str,
+                "--format=AveCPU,MaxRSS,AveRSS",
+                "--noheader",
+                "--parsable2",
+            ],
+            false,
+        )
+        .ok()?;
+
+        if result.return_code != 0 || result.stdout.trim().is_empty() {
+            return None;
+        }
+
+        // sstat may emit one line per step (.batch, .extern, .0). Take the
+        // first non-empty line — typically the batch step has the data we want.
+        let line = result.stdout.lines().find(|l| !l.trim().is_empty())?;
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        Some((
+            parts[0].trim().to_string(),
+            parts[1].trim().to_string(),
+            parts[2].trim().to_string(),
+        ))
     }
 
     /// Resolve output path, replacing SLURM placeholders.
