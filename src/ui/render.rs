@@ -378,9 +378,9 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     let table_area = area;
 
     // Six fixed-width columns (Job ID, Status, Runtime, Limit, Node) take up
-    // 10+10+10+10+15 = 55 cols, plus 5 gaps + 2 borders = 62. Whatever's left
-    // is given to the Name column, with a 10-char minimum truncation budget.
-    const FIXED_COLS_WIDTH: usize = 10 + 10 + 10 + 10 + 15 + 5 + 2;
+    // 10+10+10+10+15 = 55 cols, plus 5 gaps × 3 cells + 2 borders = 72.
+    // Whatever's left goes to the Name column, with a 10-char minimum.
+    const FIXED_COLS_WIDTH: usize = 10 + 10 + 10 + 10 + 15 + (5 * 3) + 2;
     let name_max_len = (table_area.width as usize)
         .saturating_sub(FIXED_COLS_WIDTH)
         .max(10);
@@ -463,6 +463,7 @@ fn render_status_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         ],
     )
     .header(header)
+    .column_spacing(3)
     .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ")
     .block(block_for(panel_title, focused));
