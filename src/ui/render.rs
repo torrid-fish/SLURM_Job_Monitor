@@ -77,43 +77,66 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_right_panel(frame: &mut Frame, app: &mut App, area: Rect, _output_dir: Direction) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
-    let tab_strip = chunks[0];
-    let content = chunks[1];
-
-    render_tab_strip(frame, app, tab_strip);
-
-    match app.focused_panel.right_tab() {
-        RightTab::Details => render_details_tab(frame, app, content),
-        RightTab::Output => render_output_tab(frame, app, content),
-    }
-}
-
-fn render_tab_strip(frame: &mut Frame, app: &App, area: Rect) {
     let active = app.focused_panel.right_tab();
-    let make_span = |label: &str, is_active: bool| {
-        let style = if is_active {
+    // The right panel is "active" whenever focus isn't on the JobList — i.e.
+    // it's on Details, Stdout, or Stderr.
+    let focused = !matches!(app.focused_panel, FocusBlock::JobList);
+    let border_color = if focused { FOCUS_COLOR } else { UNFOCUS_COLOR };
+
+    // Outer block — borders only, no built-in title (we draw clickable tabs
+    // on the top border ourselves so each tab gets its own click rect).
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color));
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    // Tabs live on the top border, between the rounded corners.
+    let style_for = |is_active: bool| -> Style {
+        if is_active {
             Style::default().fg(FOCUS_COLOR).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(UNFOCUS_COLOR)
-        };
-        Span::styled(format!("  {}  ", label), style)
+        }
     };
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+    let details_label = " Details ";
+    let output_label = " Output ";
+    let details_rect = app.tab_details_rect;
+    let output_rect = app.tab_output_rect;
+    let sep_rect = Rect {
+        x: details_rect.x + details_rect.width,
+        y: details_rect.y,
+        width: 1,
+        height: 1,
+    };
 
-    let details = Paragraph::new(Line::from(make_span("Details", active == RightTab::Details)))
-        .alignment(Alignment::Center);
-    let output = Paragraph::new(Line::from(make_span("Output", active == RightTab::Output)))
-        .alignment(Alignment::Center);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            details_label.to_string(),
+            style_for(active == RightTab::Details),
+        )),
+        details_rect,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "│".to_string(),
+            Style::default().fg(border_color),
+        )),
+        sep_rect,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            output_label.to_string(),
+            style_for(active == RightTab::Output),
+        )),
+        output_rect,
+    );
 
-    frame.render_widget(details, chunks[0]);
-    frame.render_widget(output, chunks[1]);
+    match active {
+        RightTab::Details => render_details_tab(frame, app, inner),
+        RightTab::Output => render_output_tab(frame, app, inner),
+    }
 }
 
 fn render_details_tab(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -220,23 +243,14 @@ fn render_details_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         None => vec![Line::from(Span::raw("No job selected"))],
     };
 
-    let focused = app.focused_panel == FocusBlock::Details;
     let total_lines = lines.len() as u16;
-    // Inner viewport height = area minus the 2 border rows.
-    let viewport = area.height.saturating_sub(2);
+    let viewport = area.height;
     let max_scroll = total_lines.saturating_sub(viewport);
     app.details_scroll_max = max_scroll;
     let scroll = app.details_scroll.min(max_scroll);
     app.details_scroll = scroll;
 
-    let title = if max_scroll > 0 {
-        format!("Details ({}/{})", scroll + 1, max_scroll + 1)
-    } else {
-        "Details".to_string()
-    };
-    let paragraph = Paragraph::new(lines)
-        .scroll((scroll, 0))
-        .block(block_for(&title, focused));
+    let paragraph = Paragraph::new(lines).scroll((scroll, 0));
     frame.render_widget(paragraph, area);
 }
 
@@ -258,22 +272,11 @@ fn parse_tres_field(tres: &str, key: &str) -> Option<String> {
 }
 
 fn render_output_tab(frame: &mut Frame, app: &mut App, area: Rect) {
-    let focused = matches!(app.focused_panel, FocusBlock::Stdout | FocusBlock::Stderr);
-
-    let job_id = match app.current_job_id {
-        Some(id) => id,
-        None => {
-            let empty = Paragraph::new("Select a job to view output")
-                .block(block_for("Output", focused));
-            frame.render_widget(empty, area);
-            return;
-        }
-    };
-
-    let title = format!("Output (Job {})", job_id);
-    let outer = block_for(&title, focused);
-    let inner = outer.inner(area);
-    frame.render_widget(outer, area);
+    if app.current_job_id.is_none() {
+        let empty = Paragraph::new("Select a job to view output");
+        frame.render_widget(empty, area);
+        return;
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -282,7 +285,7 @@ fn render_output_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(1),
             Constraint::Percentage(50),
         ])
-        .split(inner);
+        .split(area);
 
     render_inner_log(frame, app, chunks[0], LogKind::Stdout);
     render_separator(frame, chunks[1]);

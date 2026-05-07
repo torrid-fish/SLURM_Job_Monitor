@@ -522,21 +522,32 @@ impl App {
         self.joblist_panel_rect = joblist_rect;
         self.right_panel_rect = right_rect;
 
-        // Right panel split: 1-row tab strip on top + content below.
-        let right_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(right_rect);
-        let tab_strip = right_chunks[0];
-        let tab_content = right_chunks[1];
+        // The tab strip lives inside the outer block's top border. Inner is the
+        // outer rect shrunk by 1 cell on each side.
+        let tab_content = Rect {
+            x: right_rect.x.saturating_add(1),
+            y: right_rect.y.saturating_add(1),
+            width: right_rect.width.saturating_sub(2),
+            height: right_rect.height.saturating_sub(2),
+        };
 
-        // Tab strip click rects: split horizontally 50/50 for [Details | Output].
-        let tab_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(tab_strip);
-        self.tab_details_rect = tab_chunks[0];
-        self.tab_output_rect = tab_chunks[1];
+        // Tab labels rendered on the top border. Layout: " Details │ Output "
+        // starting at column right_rect.x + 2 (after the rounded corner + space).
+        let details_label_w = " Details ".chars().count() as u16;
+        let output_label_w = " Output ".chars().count() as u16;
+        let details_x = right_rect.x.saturating_add(2);
+        self.tab_details_rect = Rect {
+            x: details_x,
+            y: right_rect.y,
+            width: details_label_w,
+            height: 1,
+        };
+        self.tab_output_rect = Rect {
+            x: details_x + details_label_w + 1, // +1 for the "│" separator
+            y: right_rect.y,
+            width: output_label_w,
+            height: 1,
+        };
 
         // Tab content rects depend on the active tab.
         match self.focused_panel.right_tab() {
@@ -548,13 +559,8 @@ impl App {
             RightTab::Output => {
                 let _ = output_dir; // stdout/stderr are always stacked vertically now
                 self.details_panel_rect = Rect::default();
-                // Inner area of the merged outer block (one rounded border).
-                let inner = Rect {
-                    x: tab_content.x.saturating_add(1),
-                    y: tab_content.y.saturating_add(1),
-                    width: tab_content.width.saturating_sub(2),
-                    height: tab_content.height.saturating_sub(2),
-                };
+                // The outer block's border is the right_rect's border itself,
+                // so split tab_content directly into stdout / sep / stderr.
                 let output_chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
@@ -562,7 +568,7 @@ impl App {
                         Constraint::Length(1),
                         Constraint::Percentage(50),
                     ])
-                    .split(inner);
+                    .split(tab_content);
                 self.stdout_panel_rect = output_chunks[0];
                 self.stderr_panel_rect = output_chunks[2];
             }
@@ -570,7 +576,7 @@ impl App {
 
         // Each section reserves 1 row inside for its own header label, so the
         // visible content area is one row shorter. No inner border on either
-        // side now that the merged block draws a single border.
+        // side now that the outer block draws the only border.
         self.stdout_panel_height = self.stdout_panel_rect.height.saturating_sub(1).max(1) as usize;
         self.stderr_panel_height = self.stderr_panel_rect.height.saturating_sub(1).max(1) as usize;
         self.stdout_panel_width = self.stdout_panel_rect.width.max(1) as usize;
